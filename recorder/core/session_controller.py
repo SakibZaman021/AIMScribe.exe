@@ -78,6 +78,9 @@ class SessionController:
         self._uploader: Optional[AsyncClipUploader] = None
         self._forwarder: Optional[FileForwarder] = None
 
+        # WebSocket manager for broadcasting events to CMED browser
+        self._ws_manager = None
+
         # Paths
         self.temp_clips_dir = Path("temp_clips")
         self.recordings_dir = Path("recordings")
@@ -92,6 +95,18 @@ class SessionController:
         logger.info(f"SessionController initialized")
         logger.info(f"  Backend URL: {backend_url}")
         logger.info(f"  AIMS LAB Server: {aimslab_server_url}")
+
+    def set_ws_manager(self, ws_manager):
+        """
+        Set the WebSocket manager for broadcasting events to CMED browser.
+
+        This enables real-time updates:
+        - clip_uploaded: When a chunk is uploaded
+        - ner_ready: When NER results are available
+        - recording_stopped: When recording stops
+        """
+        self._ws_manager = ws_manager
+        logger.info("WebSocket manager linked to SessionController")
 
     async def handle_trigger(self, context: SessionContext) -> Dict[str, Any]:
         """
@@ -372,11 +387,43 @@ class SessionController:
             self._uploader.queue_clip_sync(clip_info)
 
     def _on_upload_complete(self, result: UploadResult):
-        """Handle upload complete"""
+        """Handle upload complete - broadcasts to CMED via WebSocket"""
         if result.success:
             logger.info(f"Clip {result.clip_number} uploaded successfully")
+
+            # Broadcast clip_uploaded event to CMED browser
+            if self._ws_manager:
+                asyncio.create_task(self._broadcast_clip_uploaded(result))
         else:
             logger.warning(f"Clip {result.clip_number} upload failed: {result.error}")
+
+            # Broadcast error to CMED browser
+            if self._ws_manager:
+                asyncio.create_task(self._broadcast_upload_error(result))
+
+    async def _broadcast_clip_uploaded(self, result: UploadResult):
+        """Broadcast clip_uploaded event via WebSocket"""
+        try:
+            await self._ws_manager.send_event("clip_uploaded", {
+                "session_id": self._state.session_id,
+                "patient_id": self._state.patient_id,
+                "clip_number": result.clip_number,
+                "duration_seconds": result.duration_seconds if hasattr(result, 'duration_seconds') else 0,
+                "message": "Clip uploaded successfully"
+            })
+        except Exception as e:
+            logger.warning(f"Failed to broadcast clip_uploaded: {e}")
+
+    async def _broadcast_upload_error(self, result: UploadResult):
+        """Broadcast upload error via WebSocket"""
+        try:
+            await self._ws_manager.send_event("upload_error", {
+                "session_id": self._state.session_id,
+                "clip_number": result.clip_number,
+                "error": result.error
+            })
+        except Exception as e:
+            logger.warning(f"Failed to broadcast upload_error: {e}")
 
     def _on_session_created(self, session_id: str):
         """Handle session creation callback from backend"""
@@ -385,14 +432,37 @@ class SessionController:
 
     def get_status(self) -> Dict[str, Any]:
         """Get current status"""
+        context = self._state.context
         return {
             "is_recording": self._state.is_recording,
             "session_id": self._state.session_id,  # Same as patient_id
             "patient_id": self._state.patient_id,
             "patient_name": self._state.patient_name,
+            "doctor_id": context.doctor_id if context else None,
+            "hospital_id": context.hospital_id if context else None,
             "start_time": self._state.start_time.isoformat() if self._state.start_time else None,
             "duration_seconds": self._recorder.get_duration() if self._recorder else 0
         }
+
+    async def broadcast_ner_ready(self, ner_data: Dict[str, Any]):
+        """
+        Broadcast NER results to CMED browser via WebSocket.
+
+        Called when backend sends NER results via webhook.
+        This relays the NER data to the connected CMED browser.
+        """
+        if self._ws_manager:
+            try:
+                await self._ws_manager.send_event("ner_ready", {
+                    "session_id": self._state.session_id,
+                    "patient_id": self._state.patient_id,
+                    "version": ner_data.get("version", 1),
+                    "ner": ner_data.get("ner", {}),
+                    "transcript_preview": ner_data.get("transcript_preview", "")
+                })
+                logger.info(f"NER results broadcasted to CMED browser")
+            except Exception as e:
+                logger.warning(f"Failed to broadcast NER: {e}")
 
     async def close(self):
         """Clean up resources"""

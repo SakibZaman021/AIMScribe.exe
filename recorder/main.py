@@ -17,7 +17,7 @@ from PIL import Image, ImageDraw
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import config
-from api.trigger_server import app, init_controller
+from api.trigger_server import app, init_controller, get_controller, get_websocket_manager
 
 # Setup logging
 def setup_logging():
@@ -43,7 +43,10 @@ def setup_logging():
     logger.info(f"AIMScribe Recorder v{config.app_version} starting...")
     logger.info(f"Backend URL: {config.backend.base_url}")
     logger.info(f"AIMS LAB Server: {config.aimslab_server.base_url}")
-    logger.info(f"Trigger Server: {config.trigger_server.host}:{config.trigger_server.port}")
+    logger.info(f"API Server: http://{config.trigger_server.host}:{config.trigger_server.port}")
+    logger.info(f"WebSocket: ws://{config.trigger_server.host}:{config.trigger_server.port}/ws")
+    logger.info("=" * 60)
+    logger.info("CMED Browser should connect to: ws://localhost:5050/ws")
     logger.info("=" * 60)
 
     return logger
@@ -100,7 +103,16 @@ class RecorderTray:
 
     def on_status(self, icon, item):
         """Show status"""
-        self.logger.info("Status checked via tray menu")
+        controller = get_controller()
+        if controller:
+            status = controller.get_status()
+            if status.get("is_recording"):
+                self.logger.info(f"Recording in progress - Patient: {status.get('patient_id')}")
+                self.logger.info(f"Duration: {status.get('duration_seconds', 0):.0f}s")
+            else:
+                self.logger.info("Status: Ready (not recording)")
+        else:
+            self.logger.info("Status: Controller not initialized")
 
     def on_open_logs(self, icon, item):
         """Open logs folder"""

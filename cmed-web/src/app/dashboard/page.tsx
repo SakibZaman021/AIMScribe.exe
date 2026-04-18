@@ -1,13 +1,13 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import axios from 'axios';
 
-// API endpoints
-// Recorder always runs locally on client's PC (records from microphone)
-const RECORDER_API = 'http://localhost:5050';
-// Backend can be local or cloud - set NEXT_PUBLIC_BACKEND_URL for cloud
+// WebSocket for local AIMScribe.exe (works from HTTPS)
+const RECORDER_WS = 'ws://localhost:5050/ws';
+
+// Backend can be local or cloud
 const BACKEND_API = process.env.NEXT_PUBLIC_BACKEND_URL
   ? `${process.env.NEXT_PUBLIC_BACKEND_URL}/api/v1`
   : 'http://localhost:6000/api/v1';
@@ -35,29 +35,32 @@ interface NERFields {
   additional_notes?: { data: string[] };
 }
 
-interface NERResponse {
-  version: number;
-  is_final: boolean;
-  fields: NERFields | null;
-}
-
 export default function DashboardPage() {
   const router = useRouter();
 
   // Patient data from entry page
   const [patientData, setPatientData] = useState<PatientData | null>(null);
 
+  // WebSocket connection
+  const wsRef = useRef<WebSocket | null>(null);
+  const [wsConnected, setWsConnected] = useState(false);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
   // Recording state
   const [isRecording, setIsRecording] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [recordingDuration, setRecordingDuration] = useState(0);
+  const [clipCount, setClipCount] = useState(0);
 
-  // NER data
+  // NER data (received via WebSocket)
   const [nerData, setNerData] = useState<NERFields | null>(null);
   const [nerVersion, setNerVersion] = useState(0);
 
-  // Editable fields (for doctor modifications)
+  // Editable fields
   const [editedFields, setEditedFields] = useState<Record<string, string>>({});
+
+  // Error state
+  const [error, setError] = useState<string | null>(null);
 
   // Load patient data on mount
   useEffect(() => {
@@ -69,74 +72,182 @@ export default function DashboardPage() {
     }
   }, [router]);
 
-  // Poll for NER results when recording
+  // WebSocket connection
+  const connectWebSocket = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+
+    console.log('[AIMScribe] Connecting to', RECORDER_WS);
+
+    try {
+      const ws = new WebSocket(RECORDER_WS);
+
+      ws.onopen = () => {
+        console.log('[AIMScribe] Connected');
+        setWsConnected(true);
+        setError(null);
+        // Get current status
+        ws.send(JSON.stringify({ command: 'status' }));
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          handleWsMessage(message);
+        } catch (e) {
+          console.error('[AIMScribe] Parse error:', e);
+        }
+      };
+
+      ws.onclose = () => {
+        console.log('[AIMScribe] Disconnected');
+        setWsConnected(false);
+        wsRef.current = null;
+        // Reconnect after 3 seconds
+        reconnectTimeoutRef.current = setTimeout(connectWebSocket, 3000);
+      };
+
+      ws.onerror = () => {
+        setError('Cannot connect to AIMScribe Recorder. Make sure it is running.');
+      };
+
+      wsRef.current = ws;
+    } catch (e) {
+      setError('Failed to connect to AIMScribe Recorder');
+    }
+  }, []);
+
+  // Handle WebSocket messages
+  const handleWsMessage = useCallback((message: any) => {
+    console.log('[AIMScribe] Received:', message.event || message.status, message);
+
+    switch (message.event) {
+      case 'status':
+        setIsRecording(message.is_recording);
+        if (message.session_id) setSessionId(message.session_id);
+        break;
+
+      case 'recording_started':
+        setIsRecording(true);
+        setSessionId(message.session_id);
+        setRecordingDuration(0);
+        setNerData(null);
+        setNerVersion(0);
+        setClipCount(0);
+        setError(null);
+        break;
+
+      case 'recording_stopped':
+        setIsRecording(false);
+        break;
+
+      case 'clip_uploaded':
+        setClipCount(message.clip_number);
+        break;
+
+      case 'ner_ready':
+        // Real-time NER updates via WebSocket
+        if (message.version > nerVersion) {
+          setNerData(message.ner);
+          setNerVersion(message.version);
+        }
+        break;
+
+      case 'error':
+        setError(message.message || 'Recording error');
+        break;
+
+      default:
+        // Handle direct response (not event)
+        if (message.status === 'recording_started') {
+          setIsRecording(true);
+          setSessionId(message.session_id);
+          setRecordingDuration(0);
+          setNerData(null);
+          setNerVersion(0);
+          setClipCount(0);
+        } else if (message.status === 'stopped') {
+          setIsRecording(false);
+        } else if (message.is_recording !== undefined) {
+          setIsRecording(message.is_recording);
+          if (message.session_id) setSessionId(message.session_id);
+        }
+    }
+  }, [nerVersion]);
+
+  // Connect WebSocket on mount
   useEffect(() => {
-    if (!sessionId) return;
+    connectWebSocket();
+    return () => {
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+      if (wsRef.current) wsRef.current.close();
+    };
+  }, [connectWebSocket]);
+
+  // Update recording duration
+  useEffect(() => {
+    if (!isRecording) return;
+    const interval = setInterval(() => {
+      setRecordingDuration(prev => prev + 1);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isRecording]);
+
+  // Fallback: Poll for NER if WebSocket doesn't deliver it
+  useEffect(() => {
+    if (!sessionId || !isRecording) return;
 
     const pollInterval = setInterval(async () => {
       try {
         const response = await axios.get(`${BACKEND_API}/ner/${sessionId}`);
-        const data: NERResponse = response.data;
-
+        const data = response.data;
         if (data.version > nerVersion && data.fields) {
           setNerData(data.fields);
           setNerVersion(data.version);
         }
       } catch (error) {
-        // Session might not exist yet, ignore
+        // Session might not exist yet
       }
     }, 5000);
 
     return () => clearInterval(pollInterval);
-  }, [sessionId, nerVersion]);
+  }, [sessionId, isRecording, nerVersion]);
 
-  // Update recording duration
-  useEffect(() => {
-    if (!isRecording) return;
-
-    const interval = setInterval(() => {
-      setRecordingDuration(prev => prev + 1);
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [isRecording]);
-
-  // Trigger recording (Patient History button)
-  const handlePatientHistory = async () => {
+  // Patient History button - Start/Continue recording
+  const handlePatientHistory = () => {
     if (!patientData) return;
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      setError('Not connected to AIMScribe Recorder. Please wait...');
+      connectWebSocket();
+      return;
+    }
 
-    try {
-      const response = await axios.post(`${RECORDER_API}/trigger`, {
+    // Send start command via WebSocket
+    // If already recording, AIMScribe will auto-stop previous and start new
+    const message = {
+      command: 'start',
+      timestamp: new Date().toISOString(),
+      session: {
         patient_id: patientData.patient_id,
         patient_name: patientData.patient_name,
-        age: patientData.age,
-        gender: patientData.gender,
         doctor_id: patientData.doctor_id,
         hospital_id: patientData.hospital_id,
-        health_screening: patientData.health_screening,
-      });
+        age: patientData.age,
+        gender: patientData.gender,
+      },
+      health_screening: patientData.health_screening,
+      callback: {
+        ner_webhook_url: `${BACKEND_API}/webhook/ner`,
+      },
+    };
 
-      setSessionId(response.data.session_id);
-      setIsRecording(true);
-      setRecordingDuration(0);
-      setNerData(null);
-      setNerVersion(0);
-
-      console.log('Recording started:', response.data);
-    } catch (error) {
-      console.error('Failed to start recording:', error);
-      alert('Failed to connect to AIMScribe Recorder. Make sure it is running.');
-    }
+    console.log('[AIMScribe] Starting recording for:', patientData.patient_id);
+    wsRef.current.send(JSON.stringify(message));
   };
 
-  // Stop recording
-  const handleStopRecording = async () => {
-    try {
-      await axios.post(`${RECORDER_API}/stop`);
-      setIsRecording(false);
-    } catch (error) {
-      console.error('Failed to stop recording:', error);
-    }
+  // Stop recording manually
+  const handleStopRecording = () => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    wsRef.current.send(JSON.stringify({ command: 'stop' }));
   };
 
   // Save prescription
@@ -144,17 +255,12 @@ export default function DashboardPage() {
     if (!sessionId || !patientData) return;
 
     try {
-      const prescription = {
-        ...nerData,
-        ...editedFields,
-      };
-
+      const prescription = { ...nerData, ...editedFields };
       await axios.post(`${BACKEND_API}/prescription`, {
         session_id: sessionId,
         doctor_id: patientData.doctor_id,
         prescription: prescription,
       });
-
       alert('Prescription saved successfully!');
     } catch (error) {
       console.error('Failed to save prescription:', error);
@@ -192,7 +298,14 @@ export default function DashboardPage() {
       {/* Header */}
       <header className="bg-white shadow-sm border-b">
         <div className="max-w-7xl mx-auto px-4 py-4 flex justify-between items-center">
-          <h1 className="text-2xl font-bold text-gray-800">CMED - Doctor Dashboard</h1>
+          <div className="flex items-center space-x-4">
+            <h1 className="text-2xl font-bold text-gray-800">CMED - Doctor Dashboard</h1>
+            {/* Connection indicator */}
+            <div className={`flex items-center space-x-1 text-sm ${wsConnected ? 'text-green-600' : 'text-red-600'}`}>
+              <div className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-green-500' : 'bg-red-500'}`}></div>
+              <span>{wsConnected ? 'Connected' : 'Disconnected'}</span>
+            </div>
+          </div>
 
           {/* Recording indicator */}
           {isRecording && (
@@ -200,6 +313,7 @@ export default function DashboardPage() {
               <div className="w-3 h-3 bg-red-500 rounded-full recording-pulse"></div>
               <span className="text-red-700 font-medium">
                 Recording: {formatDuration(recordingDuration)}
+                {clipCount > 0 && <span className="text-xs ml-2">({clipCount} clips)</span>}
               </span>
               <button
                 onClick={handleStopRecording}
@@ -211,6 +325,14 @@ export default function DashboardPage() {
           )}
         </div>
       </header>
+
+      {/* Error banner */}
+      {error && (
+        <div className="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 max-w-7xl mx-auto mt-4">
+          <p>{error}</p>
+          <button onClick={() => setError(null)} className="text-sm underline mt-1">Dismiss</button>
+        </div>
+      )}
 
       <div className="max-w-7xl mx-auto px-4 py-6">
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -283,17 +405,25 @@ export default function DashboardPage() {
               <div className="mt-6">
                 <button
                   onClick={handlePatientHistory}
-                  disabled={isRecording}
+                  disabled={!wsConnected}
                   className={`w-full py-3 rounded-lg font-semibold transition-colors ${
-                    isRecording
+                    !wsConnected
                       ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                      : isRecording
+                      ? 'bg-orange-500 text-white hover:bg-orange-600'
                       : 'bg-green-600 text-white hover:bg-green-700'
                   }`}
                 >
-                  {isRecording ? 'Recording in Progress...' : '📋 Patient History'}
+                  {!wsConnected
+                    ? 'Connecting...'
+                    : isRecording
+                    ? '📋 New Patient (Stops Current)'
+                    : '📋 Patient History'}
                 </button>
                 <p className="text-xs text-gray-500 mt-2 text-center">
-                  Click to start recording consultation
+                  {isRecording
+                    ? 'Click to stop current recording and start new'
+                    : 'Click to start recording consultation'}
                 </p>
               </div>
             </div>

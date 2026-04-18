@@ -8,17 +8,19 @@ Endpoints:
 - GET /api/v1/session/status - Get recording status
 - POST /api/v1/session/force-reset - Force reset (crash recovery)
 - GET /health - Health check
+- WS /ws - WebSocket for browser-to-local communication (PRIMARY)
 """
 import logging
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 
 from pydantic import BaseModel, Field
-from fastapi import FastAPI, HTTPException, Header, Request
+from fastapi import FastAPI, HTTPException, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from core.session_controller import SessionController, SessionContext
+from api.websocket_server import get_ws_manager, WebSocketManager
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +166,7 @@ app.add_middleware(
 # ============================================================
 
 _controller: Optional[SessionController] = None
+_ws_manager: WebSocketManager = get_ws_manager()
 _api_keys: set = {"cmed_live_default", "cmed_test_key"}  # Configure in production
 
 
@@ -171,15 +174,23 @@ def init_controller(
     backend_url: str = "http://localhost:6000",
     aimslab_server_url: str = "http://localhost:7000"
 ):
-    """Initialize the session controller"""
-    global _controller
+    """Initialize the session controller and link to WebSocket manager"""
+    global _controller, _ws_manager
     _controller = SessionController(
         backend_url=backend_url,
         aimslab_server_url=aimslab_server_url
     )
+
+    # Link WebSocket manager to controller for bidirectional communication
+    _ws_manager.set_controller(_controller)
+
+    # Give controller reference to WS manager for event broadcasting
+    _controller.set_ws_manager(_ws_manager)
+
     logger.info("Session controller initialized")
     logger.info(f"  Backend URL: {backend_url}")
     logger.info(f"  AIMS LAB Server: {aimslab_server_url}")
+    logger.info("  WebSocket manager linked")
 
 
 # ============================================================
@@ -497,3 +508,125 @@ async def legacy_force_reset():
     """Legacy force-reset endpoint for backward compatibility"""
     logger.warning("Legacy /force-reset endpoint called - please migrate to /api/v1/session/force-reset")
     return await force_reset_session()
+
+
+# ============================================================
+# WebSocket Endpoint (PRIMARY - Browser Communication)
+# ============================================================
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """
+    WebSocket endpoint for browser-to-local communication.
+
+    This is the PRIMARY communication channel:
+    - CMED (browser) connects to ws://localhost:5050/ws
+    - Browser sends: start, stop, status commands
+    - AIMScribe sends: recording_started, clip_uploaded, ner_ready events
+
+    Security: Only accepts connections from localhost.
+
+    Message format:
+    {
+        "command": "start",
+        "session": {
+            "patient_id": "P5678",
+            "patient_name": "রহিম উদ্দিন",
+            "doctor_id": "DR1245",
+            "hospital_id": "HOSP_AALO",
+            "age": "45",
+            "gender": "Male"
+        },
+        "health_screening": {
+            "bp_systolic": "120",
+            "bp_diastolic": "80"
+        },
+        "callback": {
+            "ner_webhook_url": "https://cmed.vercel.app/api/webhook/ner"
+        }
+    }
+    """
+    # Attempt connection (includes localhost security check)
+    if not await _ws_manager.connect(websocket):
+        return
+
+    try:
+        while True:
+            # Receive message from browser
+            data = await websocket.receive_text()
+
+            # Handle the message
+            response = await _ws_manager.handle_message(websocket, data)
+
+            # Send response back to this client
+            await websocket.send_json(response)
+
+    except WebSocketDisconnect:
+        await _ws_manager.disconnect(websocket)
+        logger.info("WebSocket client disconnected gracefully")
+
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}", exc_info=True)
+        await _ws_manager.disconnect(websocket)
+
+
+# ============================================================
+# NER Webhook Receiver (Backend → Local → Browser)
+# ============================================================
+
+@app.post("/api/v1/webhook/ner")
+async def receive_ner_webhook(request: Request):
+    """
+    Receive NER results from backend and relay to CMED browser.
+
+    The backend processes audio clips and sends NER results here.
+    This endpoint relays them to the connected browser via WebSocket.
+
+    Expected payload:
+    {
+        "session_id": "P5678",
+        "patient_id": "P5678",
+        "version": 1,
+        "ner": {
+            "chief_complaints": ["জ্বর", "মাথা ব্যথা"],
+            "diagnosis": ["Viral fever"]
+        },
+        "transcript_preview": "রোগী বলছেন জ্বর আর মাথা ব্যথা..."
+    }
+    """
+    try:
+        data = await request.json()
+        logger.info(f"Received NER webhook: session={data.get('session_id')}, version={data.get('version')}")
+
+        # Relay to browser via WebSocket
+        if _controller:
+            await _controller.broadcast_ner_ready(data)
+
+        # Also broadcast via WebSocket manager directly
+        await _ws_manager.send_event("ner_ready", {
+            "session_id": data.get("session_id"),
+            "patient_id": data.get("patient_id"),
+            "version": data.get("version", 1),
+            "ner": data.get("ner", {}),
+            "transcript_preview": data.get("transcript_preview", "")
+        })
+
+        return {"status": "received", "relayed": True}
+
+    except Exception as e:
+        logger.error(f"NER webhook error: {e}", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+
+# ============================================================
+# Utility Functions
+# ============================================================
+
+def get_controller() -> Optional[SessionController]:
+    """Get the session controller instance"""
+    return _controller
+
+
+def get_websocket_manager() -> WebSocketManager:
+    """Get the WebSocket manager instance"""
+    return _ws_manager
