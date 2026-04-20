@@ -46,11 +46,13 @@ export default function DashboardPage() {
   const [wsConnected, setWsConnected] = useState(false);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Recording state
+  // Recording state (synced from AIMScribe)
   const [isRecording, setIsRecording] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [recordingPatientId, setRecordingPatientId] = useState<string | null>(null);
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [clipCount, setClipCount] = useState(0);
+  const recordingStartTimeRef = useRef<number | null>(null);
 
   // NER data (received via WebSocket)
   const [nerData, setNerData] = useState<NERFields | null>(null);
@@ -85,7 +87,7 @@ export default function DashboardPage() {
         console.log('[AIMScribe] Connected');
         setWsConnected(true);
         setError(null);
-        // Get current status
+        // Get current recording status from AIMScribe (does NOT affect recording)
         ws.send(JSON.stringify({ command: 'status' }));
       };
 
@@ -99,10 +101,10 @@ export default function DashboardPage() {
       };
 
       ws.onclose = () => {
-        console.log('[AIMScribe] Disconnected');
+        console.log('[AIMScribe] Disconnected (recording continues in AIMScribe)');
         setWsConnected(false);
         wsRef.current = null;
-        // Reconnect after 3 seconds
+        // Reconnect after 3 seconds - recording is NOT affected
         reconnectTimeoutRef.current = setTimeout(connectWebSocket, 3000);
       };
 
@@ -120,16 +122,27 @@ export default function DashboardPage() {
   const handleWsMessage = useCallback((message: any) => {
     console.log('[AIMScribe] Received:', message.event || message.status, message);
 
-    switch (message.event) {
+    const event = message.event || message.status;
+
+    switch (event) {
       case 'status':
-        setIsRecording(message.is_recording);
+        // Sync state from AIMScribe (page reload/reconnect)
+        setIsRecording(message.is_recording || false);
         if (message.session_id) setSessionId(message.session_id);
+        if (message.patient_id) setRecordingPatientId(message.patient_id);
+        // Sync duration from AIMScribe
+        if (message.duration_seconds) {
+          setRecordingDuration(Math.floor(message.duration_seconds));
+          recordingStartTimeRef.current = Date.now() - (message.duration_seconds * 1000);
+        }
         break;
 
       case 'recording_started':
         setIsRecording(true);
         setSessionId(message.session_id);
+        setRecordingPatientId(message.patient_id);
         setRecordingDuration(0);
+        recordingStartTimeRef.current = Date.now();
         setNerData(null);
         setNerVersion(0);
         setClipCount(0);
@@ -138,6 +151,7 @@ export default function DashboardPage() {
 
       case 'recording_stopped':
         setIsRecording(false);
+        recordingStartTimeRef.current = null;
         break;
 
       case 'clip_uploaded':
@@ -157,19 +171,14 @@ export default function DashboardPage() {
         break;
 
       default:
-        // Handle direct response (not event)
-        if (message.status === 'recording_started') {
-          setIsRecording(true);
-          setSessionId(message.session_id);
-          setRecordingDuration(0);
-          setNerData(null);
-          setNerVersion(0);
-          setClipCount(0);
-        } else if (message.status === 'stopped') {
-          setIsRecording(false);
-        } else if (message.is_recording !== undefined) {
+        // Handle responses with is_recording field
+        if (message.is_recording !== undefined) {
           setIsRecording(message.is_recording);
           if (message.session_id) setSessionId(message.session_id);
+          if (message.patient_id) setRecordingPatientId(message.patient_id);
+          if (message.duration_seconds) {
+            setRecordingDuration(Math.floor(message.duration_seconds));
+          }
         }
     }
   }, [nerVersion]);
@@ -179,16 +188,25 @@ export default function DashboardPage() {
     connectWebSocket();
     return () => {
       if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+      // Don't close WebSocket on unmount - just clean up ref
+      // Recording continues in AIMScribe regardless
       if (wsRef.current) wsRef.current.close();
     };
   }, [connectWebSocket]);
 
-  // Update recording duration
+  // Update recording duration timer (syncs with AIMScribe start time)
   useEffect(() => {
     if (!isRecording) return;
+
     const interval = setInterval(() => {
-      setRecordingDuration(prev => prev + 1);
+      if (recordingStartTimeRef.current) {
+        const elapsed = Math.floor((Date.now() - recordingStartTimeRef.current) / 1000);
+        setRecordingDuration(elapsed);
+      } else {
+        setRecordingDuration(prev => prev + 1);
+      }
     }, 1000);
+
     return () => clearInterval(interval);
   }, [isRecording]);
 
@@ -212,7 +230,7 @@ export default function DashboardPage() {
     return () => clearInterval(pollInterval);
   }, [sessionId, isRecording, nerVersion]);
 
-  // Patient History button - Start/Continue recording
+  // Patient History button - Start recording for THIS patient
   const handlePatientHistory = () => {
     if (!patientData) return;
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
@@ -222,7 +240,7 @@ export default function DashboardPage() {
     }
 
     // Send start command via WebSocket
-    // If already recording, AIMScribe will auto-stop previous and start new
+    // If already recording different patient, AIMScribe auto-stops previous and starts new
     const message = {
       command: 'start',
       timestamp: new Date().toISOString(),
@@ -242,12 +260,6 @@ export default function DashboardPage() {
 
     console.log('[AIMScribe] Starting recording for:', patientData.patient_id);
     wsRef.current.send(JSON.stringify(message));
-  };
-
-  // Stop recording manually
-  const handleStopRecording = () => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    wsRef.current.send(JSON.stringify({ command: 'stop' }));
   };
 
   // Save prescription
@@ -293,6 +305,10 @@ export default function DashboardPage() {
     return <div className="p-8 text-center">Loading...</div>;
   }
 
+  // Check if recording is for current patient
+  const isRecordingCurrentPatient = isRecording && recordingPatientId === patientData.patient_id;
+  const isRecordingOtherPatient = isRecording && recordingPatientId && recordingPatientId !== patientData.patient_id;
+
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
@@ -307,7 +323,7 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* Recording indicator */}
+          {/* Recording indicator - NO STOP BUTTON */}
           {isRecording && (
             <div className="flex items-center space-x-3 bg-red-100 px-4 py-2 rounded-lg">
               <div className="w-3 h-3 bg-red-500 rounded-full recording-pulse"></div>
@@ -315,12 +331,11 @@ export default function DashboardPage() {
                 Recording: {formatDuration(recordingDuration)}
                 {clipCount > 0 && <span className="text-xs ml-2">({clipCount} clips)</span>}
               </span>
-              <button
-                onClick={handleStopRecording}
-                className="px-3 py-1 bg-red-600 text-white text-sm rounded hover:bg-red-700"
-              >
-                Stop
-              </button>
+              {recordingPatientId && (
+                <span className="text-xs text-red-600">
+                  Patient: {recordingPatientId}
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -403,26 +418,35 @@ export default function DashboardPage() {
 
               {/* Patient History Button - TRIGGERS RECORDING */}
               <div className="mt-6">
-                <button
-                  onClick={handlePatientHistory}
-                  disabled={!wsConnected}
-                  className={`w-full py-3 rounded-lg font-semibold transition-colors ${
-                    !wsConnected
-                      ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                      : isRecording
-                      ? 'bg-orange-500 text-white hover:bg-orange-600'
-                      : 'bg-green-600 text-white hover:bg-green-700'
-                  }`}
-                >
-                  {!wsConnected
-                    ? 'Connecting...'
-                    : isRecording
-                    ? '📋 New Patient (Stops Current)'
-                    : '📋 Patient History'}
-                </button>
+                {isRecordingCurrentPatient ? (
+                  // Already recording this patient
+                  <div className="w-full py-3 rounded-lg bg-green-100 text-green-800 font-semibold text-center">
+                    Recording in Progress...
+                  </div>
+                ) : (
+                  <button
+                    onClick={handlePatientHistory}
+                    disabled={!wsConnected}
+                    className={`w-full py-3 rounded-lg font-semibold transition-colors ${
+                      !wsConnected
+                        ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                        : isRecordingOtherPatient
+                        ? 'bg-orange-500 text-white hover:bg-orange-600'
+                        : 'bg-green-600 text-white hover:bg-green-700'
+                    }`}
+                  >
+                    {!wsConnected
+                      ? 'Connecting...'
+                      : isRecordingOtherPatient
+                      ? '📋 Start (Stops Previous Patient)'
+                      : '📋 Patient History'}
+                  </button>
+                )}
                 <p className="text-xs text-gray-500 mt-2 text-center">
-                  {isRecording
-                    ? 'Click to stop current recording and start new'
+                  {isRecordingCurrentPatient
+                    ? 'Recording continues until next patient'
+                    : isRecordingOtherPatient
+                    ? 'Will stop recording for previous patient'
                     : 'Click to start recording consultation'}
                 </p>
               </div>

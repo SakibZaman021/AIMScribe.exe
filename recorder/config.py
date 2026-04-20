@@ -28,7 +28,9 @@ class SplitterConfig:
 @dataclass
 class BackendConfig:
     """AIMScribe Backend API configuration"""
-    base_url: str = "http://localhost:6000"
+    # Default to Render.com backend (production)
+    # Override with AIMSCRIBE_BACKEND_URL env var for local testing
+    base_url: str = "https://aimscribe-backend-render.onrender.com"
     api_prefix: str = "/api/v1"
 
     # Endpoints
@@ -57,7 +59,8 @@ class AimsLabServerConfig:
     """AIMS LAB local server configuration (receives audio files)"""
     base_url: str = "http://localhost:7000"
     # Set to True to forward recordings to AIMS LAB server
-    forward_recordings: bool = True
+    # Disabled by default - enable when AIMS LAB server is running
+    forward_recordings: bool = False
     # Delete local recording after successful forward
     delete_after_forward: bool = True
 
