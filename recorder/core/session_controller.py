@@ -231,11 +231,13 @@ class SessionController:
         """
         Start a new recording session.
 
-        session_id = patient_id (from CMED)
+        session_id format: PatientID_DoctorID_HospitalID_YYYYMMDD
         """
         try:
-            # Use patient_id as session_id
-            session_id = context.patient_id
+            # Generate session_id matching the uploader format
+            from datetime import datetime
+            date_str = datetime.now().strftime("%Y%m%d")
+            session_id = f"{context.patient_id}_{context.doctor_id}_{context.hospital_id}_{date_str}"
 
             # Reset recorder singleton
             AudioRecorder.reset_instance()
@@ -288,14 +290,14 @@ class SessionController:
 
             # Update state
             self._state.is_recording = True
-            self._state.session_id = session_id  # Same as patient_id
+            self._state.session_id = session_id  # Format: PatientID_DoctorID_HospitalID_YYYYMMDD
             self._state.patient_id = context.patient_id
             self._state.patient_name = context.patient_name
             self._state.start_time = start_time
             self._state.context = context
 
             logger.info(f"Session started for patient {context.patient_id}")
-            logger.info(f"Session ID (patient_id): {session_id}")
+            logger.info(f"Session ID: {session_id}")
 
             return session_id
 

@@ -12,6 +12,11 @@ const BACKEND_API = process.env.NEXT_PUBLIC_BACKEND_URL
   ? `${process.env.NEXT_PUBLIC_BACKEND_URL}/api/v1`
   : 'http://localhost:6000/api/v1';
 
+// CMED Frontend URL for webhooks (where backend sends NER data)
+const CMED_WEBHOOK_BASE = typeof window !== 'undefined'
+  ? window.location.origin
+  : process.env.NEXT_PUBLIC_CMED_URL || 'http://localhost:3000';
+
 interface PatientData {
   patient_id: string;
   patient_name: string;
@@ -210,22 +215,66 @@ export default function DashboardPage() {
     return () => clearInterval(interval);
   }, [isRecording]);
 
-  // Fallback: Poll for NER if WebSocket doesn't deliver it
+  // Helper to normalize NER data format
+  const normalizeNerData = (fields: any): NERFields => {
+    if (!fields) return {};
+
+    const normalize = (value: any): { data: any[] } => {
+      if (!value) return { data: [] };
+      if (value.data) return value; // Already in {data: [...]} format
+      if (Array.isArray(value)) return { data: value };
+      if (typeof value === 'object') {
+        // Convert object to array of "key: value" strings
+        return {
+          data: Object.entries(value)
+            .filter(([_, v]) => v)
+            .map(([k, v]) => `${k}: ${v}`)
+        };
+      }
+      return { data: [String(value)] };
+    };
+
+    return {
+      chief_complaints: normalize(fields.chief_complaints),
+      drug_history: normalize(fields.drug_history),
+      on_examination: normalize(fields.on_examination),
+      systemic_examination: normalize(fields.systemic_examination),
+      investigations: normalize(fields.investigations),
+      diagnosis: normalize(fields.diagnosis),
+      medications: normalize(fields.medications),
+      advice: normalize(fields.advice),
+      follow_up: normalize(fields.follow_up),
+      additional_notes: normalize(fields.additional_notes),
+    };
+  };
+
+  // Poll for NER from backend (fallback if webhook fails)
   useEffect(() => {
     if (!sessionId || !isRecording) return;
 
     const pollInterval = setInterval(async () => {
       try {
+        // Try backend API first
         const response = await axios.get(`${BACKEND_API}/ner/${sessionId}`);
         const data = response.data;
         if (data.version > nerVersion && data.fields) {
-          setNerData(data.fields);
+          setNerData(normalizeNerData(data.fields));
           setNerVersion(data.version);
         }
       } catch (error) {
-        // Session might not exist yet
+        // Session might not exist yet, try CMED webhook store
+        try {
+          const webhookResponse = await axios.get(`/api/webhook/ner?session_id=${sessionId}`);
+          const webhookData = webhookResponse.data;
+          if (webhookData.version > nerVersion && webhookData.ner) {
+            setNerData(webhookData.ner);
+            setNerVersion(webhookData.version);
+          }
+        } catch {
+          // Both failed, ignore
+        }
       }
-    }, 5000);
+    }, 3000); // Poll every 3 seconds for faster updates
 
     return () => clearInterval(pollInterval);
   }, [sessionId, isRecording, nerVersion]);
@@ -254,7 +303,8 @@ export default function DashboardPage() {
       },
       health_screening: patientData.health_screening,
       callback: {
-        ner_webhook_url: `${BACKEND_API}/webhook/ner`,
+        // Send NER webhooks to CMED frontend (this Vercel app), NOT the backend
+        ner_webhook_url: `${CMED_WEBHOOK_BASE}/api/webhook/ner`,
       },
     };
 
