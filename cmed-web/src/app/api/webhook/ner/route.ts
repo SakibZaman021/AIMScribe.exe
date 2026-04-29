@@ -30,11 +30,13 @@ const nerStore = new Map<string, {
 // Clean up old entries (older than 1 hour)
 setInterval(() => {
   const oneHourAgo = Date.now() - 3600000;
-  for (const [key, value] of nerStore.entries()) {
+  const keysToDelete: string[] = [];
+  nerStore.forEach((value, key) => {
     if (value.timestamp < oneHourAgo) {
-      nerStore.delete(key);
+      keysToDelete.push(key);
     }
-  }
+  });
+  keysToDelete.forEach(key => nerStore.delete(key));
 }, 60000);
 
 export async function POST(request: NextRequest) {
