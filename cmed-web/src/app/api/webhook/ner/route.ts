@@ -3,6 +3,8 @@
  *
  * This endpoint receives real-time NER updates from the backend
  * and stores them for the dashboard to display.
+ *
+ * Updated: Fixed Map iteration for ES5 compatibility
  */
 
 import { NextRequest, NextResponse } from 'next/server';
