@@ -215,23 +215,71 @@ export default function DashboardPage() {
     return () => clearInterval(interval);
   }, [isRecording]);
 
+  // Helper to convert any value to display string array
+  const toStringArray = (value: any): string[] => {
+    if (!value) return [];
+    if (Array.isArray(value)) {
+      return value.map(item => {
+        if (typeof item === 'string') return item;
+        if (typeof item === 'object') {
+          // Convert object to readable string (e.g., "Fever for 3 days")
+          const parts: string[] = [];
+          // Handle different object structures
+          if (item.complaint) parts.push(item.complaint);
+          if (item.duration) parts.push(`for ${item.duration}`);
+          if (item.name) parts.push(item.name);
+          if (item['Name (English)']) parts.push(item['Name (English)']);
+          // If no known keys, stringify all non-empty values
+          if (parts.length === 0) {
+            Object.entries(item).forEach(([k, v]) => {
+              if (v && typeof v === 'string') parts.push(v);
+            });
+          }
+          return parts.join(' ') || JSON.stringify(item);
+        }
+        return String(item);
+      });
+    }
+    if (typeof value === 'object') {
+      // Convert object to "key: value" strings, filtering empty values
+      return Object.entries(value)
+        .filter(([_, v]) => v && v !== '')
+        .map(([k, v]) => {
+          // Clean up key names (remove "(English)" suffix)
+          const cleanKey = k.replace(/\s*\(English\)|\s*\(Bengali\)/g, '');
+          return `${cleanKey}: ${v}`;
+        });
+    }
+    if (typeof value === 'string') return [value];
+    return [];
+  };
+
+  // Helper to normalize medications to table format
+  const normalizeMedications = (meds: any): any[] => {
+    if (!meds) return [];
+    if (!Array.isArray(meds)) return [];
+
+    return meds.map(med => {
+      if (typeof med === 'string') {
+        return { name: med, dose: '', frequency: '', duration: '', instruction: '' };
+      }
+      // Map NER field names to display field names
+      return {
+        name: med['Name (English)'] || med.name || med.Name || '',
+        dose: med['Dosage (English)'] || med.dose || med.Dosage || '',
+        frequency: med['Schedule (Bengali)'] || med.frequency || med.Schedule || '',
+        duration: med['Duration (Bengali)'] || med.duration || med.Duration || '',
+        instruction: med['Instruction (Bengali)'] || med.instruction || med.Instruction || '',
+      };
+    });
+  };
+
   // Helper to normalize NER data format
   const normalizeNerData = (fields: any): NERFields => {
     if (!fields) return {};
 
-    const normalize = (value: any): { data: any[] } => {
-      if (!value) return { data: [] };
-      if (value.data) return value; // Already in {data: [...]} format
-      if (Array.isArray(value)) return { data: value };
-      if (typeof value === 'object') {
-        // Convert object to array of "key: value" strings
-        return {
-          data: Object.entries(value)
-            .filter(([_, v]) => v)
-            .map(([k, v]) => `${k}: ${v}`)
-        };
-      }
-      return { data: [String(value)] };
+    const normalize = (value: any): { data: string[] } => {
+      return { data: toStringArray(value) };
     };
 
     return {
@@ -241,7 +289,7 @@ export default function DashboardPage() {
       systemic_examination: normalize(fields.systemic_examination),
       investigations: normalize(fields.investigations),
       diagnosis: normalize(fields.diagnosis),
-      medications: normalize(fields.medications),
+      medications: { data: normalizeMedications(fields.medications) },
       advice: normalize(fields.advice),
       follow_up: normalize(fields.follow_up),
       additional_notes: normalize(fields.additional_notes),
@@ -337,19 +385,26 @@ export default function DashboardPage() {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Render array field
-  const renderArrayField = (label: string, data: string[] | undefined) => (
-    <div className="mb-4">
-      <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label>
-      <textarea
-        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-        rows={3}
-        value={data?.join('\n') || ''}
-        onChange={(e) => setEditedFields(prev => ({ ...prev, [label]: e.target.value }))}
-        placeholder={`Enter ${label.toLowerCase()}...`}
-      />
-    </div>
-  );
+  // Render array field with editable textarea
+  const renderArrayField = (label: string, fieldKey: string, data: string[] | undefined) => {
+    // Use edited value if available, otherwise use NER data
+    const displayValue = editedFields[fieldKey] !== undefined
+      ? editedFields[fieldKey]
+      : (data?.join('\n') || '');
+
+    return (
+      <div className="mb-4">
+        <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label>
+        <textarea
+          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none"
+          rows={3}
+          value={displayValue}
+          onChange={(e) => setEditedFields(prev => ({ ...prev, [fieldKey]: e.target.value }))}
+          placeholder={`Enter ${label.toLowerCase()}...`}
+        />
+      </div>
+    );
+  };
 
   if (!patientData) {
     return <div className="p-8 text-center">Loading...</div>;
@@ -525,19 +580,19 @@ export default function DashboardPage() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               {/* Left Fields */}
               <div>
-                {renderArrayField('Chief Complaints', nerData?.chief_complaints?.data)}
-                {renderArrayField('Drug History', nerData?.drug_history?.data)}
-                {renderArrayField('On Examination', nerData?.on_examination?.data)}
-                {renderArrayField('Systemic Examination', nerData?.systemic_examination?.data)}
-                {renderArrayField('Investigations', nerData?.investigations?.data)}
+                {renderArrayField('Chief Complaints', 'chief_complaints', nerData?.chief_complaints?.data)}
+                {renderArrayField('Drug History', 'drug_history', nerData?.drug_history?.data)}
+                {renderArrayField('On Examination (O/E)', 'on_examination', nerData?.on_examination?.data)}
+                {renderArrayField('Systemic Examination (S/E)', 'systemic_examination', nerData?.systemic_examination?.data)}
+                {renderArrayField('Investigations', 'investigations', nerData?.investigations?.data)}
               </div>
 
               {/* Right Fields */}
               <div>
-                {renderArrayField('Diagnosis', nerData?.diagnosis?.data)}
-                {renderArrayField('Advice', nerData?.advice?.data)}
-                {renderArrayField('Follow Up', nerData?.follow_up?.data)}
-                {renderArrayField('Additional Notes', nerData?.additional_notes?.data)}
+                {renderArrayField('Diagnosis', 'diagnosis', nerData?.diagnosis?.data)}
+                {renderArrayField('Advice', 'advice', nerData?.advice?.data)}
+                {renderArrayField('Follow Up', 'follow_up', nerData?.follow_up?.data)}
+                {renderArrayField('Additional Notes', 'additional_notes', nerData?.additional_notes?.data)}
 
                 {/* Medications Table */}
                 <div className="mb-4">
@@ -546,23 +601,27 @@ export default function DashboardPage() {
                     <table className="w-full text-sm">
                       <thead className="bg-gray-50">
                         <tr>
-                          <th className="px-2 py-1 text-left">Name</th>
-                          <th className="px-2 py-1 text-left">Dose</th>
-                          <th className="px-2 py-1 text-left">Freq</th>
+                          <th className="px-2 py-1 text-left">Medicine Name</th>
+                          <th className="px-2 py-1 text-left">Dosage</th>
+                          <th className="px-2 py-1 text-left">Schedule</th>
                           <th className="px-2 py-1 text-left">Duration</th>
+                          <th className="px-2 py-1 text-left">Instruction</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {nerData?.medications?.data?.map((med: any, idx: number) => (
-                          <tr key={idx} className="border-t">
-                            <td className="px-2 py-1">{med.name || '-'}</td>
-                            <td className="px-2 py-1">{med.dose || '-'}</td>
-                            <td className="px-2 py-1">{med.frequency || '-'}</td>
-                            <td className="px-2 py-1">{med.duration || '-'}</td>
-                          </tr>
-                        )) || (
+                        {nerData?.medications?.data && nerData.medications.data.length > 0 ? (
+                          nerData.medications.data.map((med: any, idx: number) => (
+                            <tr key={idx} className="border-t hover:bg-gray-50">
+                              <td className="px-2 py-2 font-medium">{med.name || '-'}</td>
+                              <td className="px-2 py-2">{med.dose || '-'}</td>
+                              <td className="px-2 py-2">{med.frequency || '-'}</td>
+                              <td className="px-2 py-2">{med.duration || '-'}</td>
+                              <td className="px-2 py-2 text-gray-600">{med.instruction || '-'}</td>
+                            </tr>
+                          ))
+                        ) : (
                           <tr>
-                            <td colSpan={4} className="px-2 py-4 text-center text-gray-400">
+                            <td colSpan={5} className="px-2 py-4 text-center text-gray-400">
                               No medications yet
                             </td>
                           </tr>
