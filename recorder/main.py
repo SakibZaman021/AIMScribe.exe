@@ -1,198 +1,483 @@
 """
-AIMScribe Recorder - System Tray Application
-Runs in background, receives triggers from CMED via localhost:5050
+AIMScribe Agent - Windows system tray application.
+
+Runs in the background on every doctor PC, like a security agent: always present,
+always visibly showing its state, and not casually switched off.
+
+What makes this the shipping build rather than a demo:
+
+* The icon reflects state - ready, recording, paused, backend unreachable,
+  misconfigured - instead of being a static green dot. A recorder that never
+  looks like it is recording is not defensible.
+* Only one instance can run, enforced by a named mutex.
+* Configuration problems are surfaced in the menu and block recording rather than
+  being logged and ignored.
+* Integrity alerts raise a desktop notification.
+* Exit is available to administrators only. A doctor cannot silently stop
+  collection, and when an administrator does, it is written to the log.
+* Logs rotate daily, are capped by retention, and carry pseudonyms rather than
+  patient or doctor identifiers.
 """
-import sys
-import os
-import asyncio
+from __future__ import annotations
+
+import ctypes
 import logging
+import logging.handlers
+import os
+import secrets
+import sys
 import threading
-from datetime import datetime
+import time
+import webbrowser
+from pathlib import Path
+from typing import Optional
 
-import uvicorn
-from pystray import Icon, Menu, MenuItem
-from PIL import Image, ImageDraw
-
-# Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import config
-from api.trigger_server import app, init_controller, get_controller, get_websocket_manager
+from config import config  # noqa: E402
+from core import crypto  # noqa: E402
 
-# Setup logging
-def setup_logging():
-    """Configure logging"""
-    os.makedirs(config.paths.logs_dir, exist_ok=True)
+logger = logging.getLogger("aimscribe")
 
-    log_file = os.path.join(
-        config.paths.logs_dir,
-        f"recorder_{datetime.now().strftime('%Y%m%d')}.log"
+MUTEX_NAME = "Global\\AIMScribeAgentSingleton"
+
+# Tray states
+READY = "ready"
+RECORDING = "recording"
+PAUSED = "paused"
+OFFLINE = "offline"
+BLOCKED = "blocked"
+
+_PALETTE = {
+    READY:     ((38, 132, 90), "Ready"),
+    RECORDING: ((198, 40, 40), "Recording"),
+    PAUSED:    ((176, 122, 26), "Paused"),
+    OFFLINE:   ((70, 100, 130), "Recording - backend unreachable"),
+    BLOCKED:   ((110, 110, 118), "Not configured"),
+}
+
+
+# ============================================================
+# Logging
+# ============================================================
+
+def setup_logging() -> None:
+    config.paths.logs_dir.mkdir(parents=True, exist_ok=True)
+    log_file = config.paths.logs_dir / "agent.log"
+
+    handlers: list[logging.Handler] = []
+    rotating = logging.handlers.TimedRotatingFileHandler(
+        log_file, when="midnight", backupCount=config.ops.log_retention_days,
+        encoding="utf-8", delay=True,
     )
+    rotating.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)-8s %(name)s: %(message)s"))
+    handlers.append(rotating)
+
+    if not getattr(sys, "frozen", False):
+        console = logging.StreamHandler()
+        console.setFormatter(logging.Formatter("%(levelname)-8s %(name)s: %(message)s"))
+        handlers.append(console)
 
     logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file, encoding='utf-8'),
-            logging.StreamHandler()
-        ]
+        level=getattr(logging, config.ops.log_level, logging.INFO),
+        handlers=handlers,
+        force=True,
     )
-
-    logger = logging.getLogger(__name__)
-    logger.info("=" * 60)
-    logger.info(f"AIMScribe Recorder v{config.app_version} starting...")
-    logger.info(f"Backend URL: {config.backend.base_url}")
-    logger.info(f"AIMS LAB Server: {config.aimslab_server.base_url}")
-    logger.info(f"API Server: http://{config.trigger_server.host}:{config.trigger_server.port}")
-    logger.info(f"WebSocket: ws://{config.trigger_server.host}:{config.trigger_server.port}/ws")
-    logger.info("=" * 60)
-    logger.info("CMED Browser should connect to: ws://localhost:5050/ws")
-    logger.info("=" * 60)
-
-    return logger
+    # These log every request, including to /health, and add nothing here.
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 
-def create_tray_icon():
-    """Create system tray icon image"""
-    # Create a simple icon (red circle for recording indicator)
+def load_log_salt() -> bytes:
+    """
+    Machine-local salt for log pseudonyms.
+
+    Stable across restarts so support can correlate lines about one session, and
+    machine-bound so the pseudonyms cannot be reversed off this PC.
+    """
+    path = config.security.device_key_path.parent / "log.salt"
+    allow_plaintext = config.security.allow_plaintext_keystore
+    if path.is_file():
+        try:
+            return crypto.unwrap_secret(path.read_bytes(), allow_plaintext=allow_plaintext)
+        except Exception:
+            logger.warning("Log salt unreadable; generating a new one")
+    salt = secrets.token_bytes(32)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(crypto.wrap_secret(salt, allow_plaintext=allow_plaintext))
+    except Exception as exc:
+        logger.warning("Could not persist the log salt: %s", exc)
+    return salt
+
+
+# ============================================================
+# Windows helpers
+# ============================================================
+
+def acquire_single_instance() -> Optional[object]:
+    """Return a mutex handle, or None if another agent already owns it."""
+    if sys.platform != "win32":
+        return object()
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+    if not handle:
+        return None
+    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+        return None
+    return handle
+
+
+def is_administrator() -> bool:
+    if sys.platform != "win32":
+        return True
+    try:
+        return bool(ctypes.WinDLL("shell32").IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+# ============================================================
+# Icon
+# ============================================================
+
+def build_icon(state: str):
+    """A ringed microphone glyph tinted by state, drawn at 64 px."""
+    from PIL import Image, ImageDraw
+
+    colour, _ = _PALETTE.get(state, _PALETTE[READY])
     size = 64
-    image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
 
-    # Draw a microphone-like icon (simplified)
-    # Outer circle (green for ready)
-    draw.ellipse([4, 4, size-4, size-4], fill=(76, 175, 80, 255))  # Green
+    draw.ellipse([2, 2, size - 2, size - 2], fill=colour + (255,))
+    draw.ellipse([9, 9, size - 9, size - 9], fill=(252, 252, 253, 255))
 
-    # Inner circle (white)
-    inner_margin = 16
-    draw.ellipse(
-        [inner_margin, inner_margin, size-inner_margin, size-inner_margin],
-        fill=(255, 255, 255, 255)
-    )
+    # Microphone capsule and stand.
+    draw.rounded_rectangle([27, 18, 37, 36], radius=5, fill=colour + (255,))
+    draw.arc([22, 27, 42, 43], start=0, end=180, fill=colour + (255,), width=3)
+    draw.line([32, 43, 32, 48], fill=colour + (255,), width=3)
 
-    # Center dot (dark)
-    center_margin = 24
-    draw.ellipse(
-        [center_margin, center_margin, size-center_margin, size-center_margin],
-        fill=(33, 33, 33, 255)
-    )
+    if state == RECORDING:
+        draw.ellipse([44, 44, 58, 58], fill=(198, 40, 40, 255),
+                     outline=(255, 255, 255, 255), width=2)
+    elif state == PAUSED:
+        draw.rectangle([46, 45, 49, 57], fill=(176, 122, 26, 255))
+        draw.rectangle([53, 45, 56, 57], fill=(176, 122, 26, 255))
+    elif state in (OFFLINE, BLOCKED):
+        draw.ellipse([44, 44, 58, 58], fill=colour + (255,),
+                     outline=(255, 255, 255, 255), width=2)
+        draw.line([48, 51, 54, 51], fill=(255, 255, 255, 255), width=2)
 
     return image
 
 
-class RecorderTray:
-    """System tray application"""
+# ============================================================
+# Tray application
+# ============================================================
 
-    def __init__(self):
-        self.logger = logging.getLogger(__name__)
-        self.icon: Icon = None
-        self.server_thread: threading.Thread = None
-        self.running = True
+class AgentTray:
+    def __init__(self, runtime, server):
+        self.runtime = runtime
+        self.server = server
+        self.icon = None
+        self.state = BLOCKED if runtime.problems else READY
+        self.summary = "Starting…"
+        self._last_alert_seen = ""
+        self._stop = threading.Event()
 
-    def create_menu(self):
-        """Create tray menu"""
+    # ---- menu ----
+
+    def build_menu(self):
+        from pystray import Menu, MenuItem
+
+        def status_text(_):
+            return self.summary
+
+        def detail_text(_):
+            status = self._status()
+            if not status.get("session_id"):
+                upload = status.get("upload", {})
+                return f"Queue: {upload.get('pending_segments', 0)} segment(s) waiting"
+            return (f"Segments: {status.get('segment_count', 0)}   "
+                    f"Duration: {_format_duration(status.get('duration_seconds', 0))}")
+
+        def spool_text(_):
+            upload = self._status().get("upload", {})
+            used = upload.get("spool_bytes", 0) / (1024 ** 3)
+            return f"Local buffer: {used:.1f} GB ({upload.get('spool_pressure', '-')})"
+
+        def problem_text(_):
+            if self.runtime.problems:
+                return f"⚠ {len(self.runtime.problems)} configuration problem(s)"
+            return "Configuration OK"
+
         return Menu(
-            MenuItem("AIMScribe Recorder", None, enabled=False),
-            MenuItem("─────────────", None, enabled=False),
-            MenuItem("Status: Ready", self.on_status),
-            MenuItem("─────────────", None, enabled=False),
-            MenuItem("Open Logs", self.on_open_logs),
-            MenuItem("─────────────", None, enabled=False),
-            MenuItem("Exit", self.on_exit)
+            MenuItem(lambda _: f"AIMScribe Agent {config.app_version}", None, enabled=False),
+            Menu.SEPARATOR,
+            MenuItem(status_text, None, enabled=False),
+            MenuItem(detail_text, None, enabled=False),
+            MenuItem(spool_text, None, enabled=False),
+            Menu.SEPARATOR,
+            MenuItem(problem_text, self.on_show_problems,
+                     enabled=lambda _: bool(self.runtime.problems)),
+            MenuItem("Open CMED", self.on_open_cmed),
+            MenuItem("Open log folder", self.on_open_logs),
+            MenuItem("Copy diagnostics", self.on_copy_diagnostics),
+            Menu.SEPARATOR,
+            # Pause is deliberately not here: it requires a reason and, past the
+            # threshold, a supervisor's name. Both belong in CMED where the doctor
+            # is already identified, and where the reason is captured as text.
+            MenuItem("Pause is available in CMED", None, enabled=False),
+            Menu.SEPARATOR,
+            MenuItem(
+                "Exit (administrator only)" if not is_administrator() else "Exit",
+                self.on_exit,
+                enabled=lambda _: is_administrator(),
+            ),
         )
 
-    def on_status(self, icon, item):
-        """Show status"""
-        controller = get_controller()
-        if controller:
-            status = controller.get_status()
-            if status.get("is_recording"):
-                self.logger.info(f"Recording in progress - Patient: {status.get('patient_id')}")
-                self.logger.info(f"Duration: {status.get('duration_seconds', 0):.0f}s")
-            else:
-                self.logger.info("Status: Ready (not recording)")
+    # ---- actions ----
+
+    def on_show_problems(self, icon, item):
+        body = "\n".join(f"• {problem}" for problem in self.runtime.problems[:5])
+        self.notify("AIMScribe is not correctly configured", body or "See the log for detail.")
+        for problem in self.runtime.problems:
+            logger.critical("CONFIGURATION PROBLEM: %s", problem)
+
+    def on_open_cmed(self, icon, item):
+        origins = sorted(config.security.allowed_origins)
+        if origins:
+            webbrowser.open(origins[0])
         else:
-            self.logger.info("Status: Controller not initialized")
+            self.notify("No CMED address configured",
+                        "Set AIMS_ALLOWED_ORIGINS in the agent configuration.")
 
     def on_open_logs(self, icon, item):
-        """Open logs folder"""
-        import subprocess
-        logs_path = os.path.abspath(config.paths.logs_dir)
-        subprocess.Popen(f'explorer "{logs_path}"')
+        path = str(config.paths.logs_dir.resolve())
+        if sys.platform == "win32":
+            os.startfile(path)  # noqa: S606
+        else:
+            webbrowser.open(f"file://{path}")
+
+    def on_copy_diagnostics(self, icon, item):
+        """Put a support-ready summary on the clipboard. Contains no patient data."""
+        status = self._status()
+        upload = status.get("upload", {})
+        report = "\n".join([
+            f"AIMScribe Agent {config.app_version} (protocol {config.protocol_version})",
+            f"Device:      {self.runtime.device_key.fingerprint()}",
+            f"State:       {status.get('state', 'unknown')}",
+            f"Backend:     {config.backend.base_url}",
+            f"Online:      {upload.get('online')}  failures={upload.get('consecutive_failures')}",
+            f"Last error:  {upload.get('last_error') or '-'}",
+            f"Spool:       {upload.get('spool_bytes', 0) / 1024 ** 3:.2f} GB "
+            f"({upload.get('spool_pressure')}), {upload.get('pending_segments', 0)} pending",
+            f"Problems:    {len(self.runtime.problems)}",
+            *[f"  - {p}" for p in self.runtime.problems],
+            f"Warnings:    {len(self.runtime.warnings)}",
+            *[f"  - {w}" for w in self.runtime.warnings],
+        ])
+        if _copy_to_clipboard(report):
+            self.notify("Diagnostics copied", "Paste them into your support request.")
+        else:
+            logger.info("Diagnostics:\n%s", report)
+            self.notify("Diagnostics written to the log", "Clipboard was unavailable.")
 
     def on_exit(self, icon, item):
-        """Exit application"""
-        self.logger.info("Exit requested via tray menu")
-        self.running = False
+        if not is_administrator():
+            self.notify("Not permitted",
+                        "Stopping AIMScribe requires an administrator.")
+            logger.warning("Non-administrator attempted to exit the agent")
+            return
+        logger.warning("Agent exit requested by an administrator from the tray menu")
+        self._stop.set()
+        self.server.should_exit = True
         icon.stop()
 
-    def run_server(self):
-        """Run the FastAPI server in a separate thread"""
-        # Initialize controller with backend and AIMS LAB server URLs
-        init_controller(
-            backend_url=config.backend.base_url,
-            aimslab_server_url=config.aimslab_server.base_url
-        )
+    # ---- refresh ----
 
-        # Run uvicorn
-        uvicorn.run(
-            app,
-            host=config.trigger_server.host,
-            port=config.trigger_server.port,
-            log_level="info"
-        )
+    def _status(self) -> dict:
+        controller = self.runtime.controller
+        if controller is None:
+            return {"state": "starting", "upload": {}}
+        try:
+            return controller.status()
+        except Exception:
+            return {"state": "unknown", "upload": {}}
 
-    def run(self):
-        """Run the system tray application"""
-        # Start server in background thread
-        self.server_thread = threading.Thread(
-            target=self.run_server,
-            daemon=True,
-            name="TriggerServerThread"
-        )
-        self.server_thread.start()
+    def _derive_state(self, status: dict) -> str:
+        if self.runtime.problems:
+            return BLOCKED
+        if status.get("is_paused"):
+            return PAUSED
+        if status.get("is_recording"):
+            upload = status.get("upload", {})
+            failures = upload.get("consecutive_failures", 0)
+            return OFFLINE if failures >= 3 else RECORDING
+        return READY
 
-        self.logger.info(f"Trigger server started on {config.trigger_server.host}:{config.trigger_server.port}")
+    def _derive_summary(self, status: dict, state: str) -> str:
+        label = _PALETTE.get(state, _PALETTE[READY])[1]
+        if state == PAUSED:
+            pause = status.get("pause") or {}
+            reason = str(pause.get("reason", "")).replace("_", " ")
+            return f"Paused - {reason}" if reason else "Paused"
+        if state in (RECORDING, OFFLINE):
+            return f"{label} - {_format_duration(status.get('duration_seconds', 0))}"
+        if state == BLOCKED:
+            return f"Not configured - {len(self.runtime.problems)} problem(s)"
+        return label
 
-        # Create and run tray icon
+    def refresh_loop(self) -> None:
+        while not self._stop.wait(2.0):
+            try:
+                status = self._status()
+                state = self._derive_state(status)
+                summary = self._derive_summary(status, state)
+
+                if self.icon is not None and (state != self.state or summary != self.summary):
+                    self.state = state
+                    self.summary = summary
+                    self.icon.icon = build_icon(state)
+                    self.icon.title = f"AIMScribe - {summary}"
+                    self.icon.update_menu()
+
+                controller = self.runtime.controller
+                if controller is not None and controller.last_alert != self._last_alert_seen:
+                    self._last_alert_seen = controller.last_alert
+                    if self._last_alert_seen:
+                        self.notify("AIMScribe integrity alert", self._last_alert_seen[:200])
+            except Exception as exc:
+                logger.debug("Tray refresh error: %s", exc)
+
+    def notify(self, title: str, message: str) -> None:
+        try:
+            if self.icon is not None:
+                self.icon.notify(message, title)
+        except Exception as exc:
+            logger.debug("Notification failed (%s): %s - %s", exc, title, message)
+
+    # ---- run ----
+
+    def run(self) -> None:
+        from pystray import Icon
+
         self.icon = Icon(
-            name="AIMScribe Recorder",
-            icon=create_tray_icon(),
-            title="AIMScribe Recorder - Ready",
-            menu=self.create_menu()
+            name="AIMScribe",
+            icon=build_icon(self.state),
+            title="AIMScribe - starting",
+            menu=self.build_menu(),
         )
-
-        self.logger.info("System tray icon created")
+        threading.Thread(target=self.refresh_loop, name="TrayRefresh", daemon=True).start()
         self.icon.run()
 
 
-def main():
-    """Main entry point"""
-    logger = setup_logging()
+# ============================================================
+# Helpers
+# ============================================================
+
+def _format_duration(seconds: float) -> str:
+    total = int(seconds or 0)
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _copy_to_clipboard(text: str) -> bool:
+    if sys.platform != "win32":
+        return False
+    try:
+        import subprocess
+        subprocess.run(["clip"], input=text.encode("utf-16-le"), check=True,
+                       creationflags=0x08000000)
+        return True
+    except Exception:
+        return False
+
+
+# ============================================================
+# Entry point
+# ============================================================
+
+def main() -> int:
+    config.ensure_directories()
+    setup_logging()
+
+    logger.info("=" * 68)
+    logger.info("AIMScribe Agent %s (protocol %s) starting",
+                config.app_version, config.protocol_version)
+    logger.info("Audio:   %s Hz / %s ch / %s-bit WAV PCM",
+                config.audio.sample_rate, config.audio.channels,
+                config.audio.sample_width * 8)
+    logger.info("Backend: %s", config.backend.base_url)
+    logger.info("Listen:  http://%s:%s  (ws /ws)",
+                config.security.bind_host, config.security.bind_port)
+    logger.info("Spool:   %s (%.1f h capacity)",
+                config.spool.directory, config.spool_seconds() / 3600)
+    logger.info("=" * 68)
+
+    mutex = acquire_single_instance()
+    if mutex is None:
+        logger.error("Another AIMScribe agent is already running; exiting")
+        return 2
 
     try:
-        # Check dependencies
-        try:
-            import pyaudio
-            import aiohttp
-            import pystray
-            from PIL import Image
-        except ImportError as e:
-            logger.error(f"Missing dependency: {e}")
-            print(f"Error: Missing dependency - {e}")
-            print("Install with: pip install -r requirements.txt")
-            sys.exit(1)
+        import pyaudio  # noqa: F401
+        import aiohttp  # noqa: F401
+        import pystray  # noqa: F401
+        from PIL import Image  # noqa: F401
+        import cryptography  # noqa: F401
+    except ImportError as exc:
+        logger.critical("Missing dependency: %s", exc)
+        print(f"Missing dependency: {exc}\nInstall with: pip install -r requirements.txt")
+        return 1
 
-        # Run tray application
-        tray = RecorderTray()
+    import uvicorn
+    from api.trigger_server import Runtime, create_app
+
+    runtime = Runtime(config, log_salt=load_log_salt())
+    app = create_app(runtime)
+
+    server = uvicorn.Server(uvicorn.Config(
+        app,
+        host=config.security.bind_host,
+        port=config.security.bind_port,
+        log_level=config.ops.log_level.lower(),
+        access_log=False,
+        # Only ever loopback; a wider bind would expose the control plane.
+        server_header=False,
+        date_header=False,
+    ))
+
+    server_thread = threading.Thread(
+        target=server.run, name="ControlPlane", daemon=True)
+    server_thread.start()
+
+    # Give the control plane a moment to bind so the tray does not briefly show a
+    # healthy state for a server that failed to start.
+    for _ in range(50):
+        if getattr(server, "started", False):
+            break
+        time.sleep(0.1)
+    if not getattr(server, "started", False):
+        logger.error("Control plane did not start on %s:%s - is the port in use?",
+                     config.security.bind_host, config.security.bind_port)
+
+    tray = AgentTray(runtime, server)
+    try:
         tray.run()
-
     except KeyboardInterrupt:
-        logger.info("Interrupted by user")
-    except Exception as e:
-        logger.critical(f"Fatal error: {e}", exc_info=True)
-        sys.exit(1)
+        logger.info("Interrupted")
+    finally:
+        server.should_exit = True
+        server_thread.join(timeout=10)
+        logger.info("AIMScribe Agent stopped")
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

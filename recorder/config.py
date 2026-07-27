@@ -1,114 +1,392 @@
 """
 AIMScribe Recorder Configuration
-System tray application that receives triggers from CMED
+
+Loaded once at startup from .env next to the executable, then from the process
+environment (environment wins, so a service definition can override a file).
+
+Deliberately dependency-free: no pydantic, no python-dotenv. The .env parser is
+30 lines and keeps the packaged executable small and fast to start.
+
+Machine state lives outside the install directory so %ProgramFiles% can stay
+read-only to the logged-in user:
+
+    %PROGRAMDATA%\\AIMScribe\\spool    encrypted segment spool
+    %PROGRAMDATA%\\AIMScribe\\keys     DPAPI-wrapped device key, pinned public keys
+    %PROGRAMDATA%\\AIMScribe\\logs     rotated logs, identifiers redacted
 """
+from __future__ import annotations
+
 import os
+import sys
 from dataclasses import dataclass, field
-from typing import Optional
+from pathlib import Path
+from typing import List, Optional
+
+APP_NAME = "AIMScribe Recorder"
+APP_VERSION = "2.0.0"
+
+# Wire format version. The server rejects a mismatched agent rather than guessing.
+PROTOCOL_VERSION = 2
 
 
-@dataclass
+# ============================================================
+# Location helpers
+# ============================================================
+
+def app_dir() -> Path:
+    """Directory holding the executable (or this file when run from source)."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parent
+
+
+def data_dir() -> Path:
+    """Per-machine writable state. Created with inherited ACLs by the installer."""
+    base = os.getenv("PROGRAMDATA") or os.getenv("LOCALAPPDATA") or str(Path.home())
+    return Path(base) / "AIMScribe"
+
+
+# ============================================================
+# .env parsing
+# ============================================================
+
+def load_env_file(path: Path) -> None:
+    """Populate os.environ from a .env file. Existing variables are never replaced."""
+    if not path.is_file():
+        return
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError:
+        return
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+def _str(key: str, default: str = "") -> str:
+    value = os.getenv(key)
+    return default if value is None or value == "" else value
+
+
+def _int(key: str, default: int) -> int:
+    try:
+        return int(_str(key, str(default)))
+    except ValueError:
+        return default
+
+
+def _float(key: str, default: float) -> float:
+    try:
+        return float(_str(key, str(default)))
+    except ValueError:
+        return default
+
+
+def _bool(key: str, default: bool) -> bool:
+    return _str(key, "true" if default else "false").lower() in ("1", "true", "yes", "on")
+
+
+def _list(key: str, default: str = "") -> List[str]:
+    return [part.strip() for part in _str(key, default).split(",") if part.strip()]
+
+
+def _opt_int(key: str) -> Optional[int]:
+    value = _str(key)
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _path(key: str, fallback: Path) -> Path:
+    value = _str(key)
+    return Path(value).expanduser() if value else fallback
+
+
+# ============================================================
+# Configuration sections
+# ============================================================
+
+@dataclass(frozen=True)
 class AudioConfig:
-    """Audio recording settings"""
-    sample_rate: int = 32000  # 32kHz
-    channels: int = 1  # Mono
-    sample_width: int = 2  # 16-bit (2 bytes)
-    chunk_size: int = 1024  # Frames per buffer
+    """WAV PCM capture settings. These define the archive contract."""
+    sample_rate: int = 44100
+    channels: int = 1
+    sample_width: int = 2          # 16-bit
+    frames_per_buffer: int = 2048  # ~46 ms at 44.1 kHz
+    input_device_index: Optional[int] = None
+
+    @property
+    def bytes_per_second(self) -> int:
+        return self.sample_rate * self.channels * self.sample_width
+
+    @property
+    def bytes_per_buffer(self) -> int:
+        return self.frames_per_buffer * self.channels * self.sample_width
 
 
-@dataclass
-class SplitterConfig:
-    """Clip splitting parameters"""
-    min_clip_duration_sec: float = 170.0  # 2 min 50 sec - start monitoring
-    max_clip_duration_sec: float = 190.0  # 3 min 10 sec - hard cutoff
-    silence_threshold_sec: float = 1.0  # 1 second silence to trigger split
-    silence_rms_threshold: float = 500.0  # RMS threshold for silence
+@dataclass(frozen=True)
+class SegmentConfig:
+    """Clip boundaries. A clip closes on silence inside the window, or is forced at max."""
+    min_seconds: float = 170.0
+    max_seconds: float = 190.0
+    silence_rms: int = 320          # linear RMS, 0-32767; ~-40 dBFS
+    silence_hold_seconds: float = 1.0
 
 
-@dataclass
+@dataclass(frozen=True)
+class SpoolConfig:
+    """Local store-and-forward buffer. Segments live here until purge-receipted."""
+    directory: Path = field(default_factory=lambda: data_dir() / "spool")
+    max_bytes: int = 40 * 1024 ** 3
+    warn_ratio: float = 0.5
+    critical_ratio: float = 0.8
+    purge_grace_hours: int = 24
+
+    @property
+    def warn_bytes(self) -> int:
+        return int(self.max_bytes * self.warn_ratio)
+
+    @property
+    def critical_bytes(self) -> int:
+        return int(self.max_bytes * self.critical_ratio)
+
+
+@dataclass(frozen=True)
 class BackendConfig:
-    """AIMScribe Backend API configuration"""
-    # Default to Render.com backend (production)
-    # Override with AIMSCRIBE_BACKEND_URL env var for local testing
-    base_url: str = "https://aimscribe-backend-render.onrender.com"
-    api_prefix: str = "/api/v1"
-
-    # Endpoints
-    session_create: str = "/session/create"
-    upload_request: str = "/upload/request"
-    upload_complete: str = "/upload/complete"
-
-    # Timeouts (seconds)
-    request_timeout: int = 30
-    upload_timeout: int = 300  # 5 minutes for large files
-
-    # Retry settings
-    max_retries: int = 3
-    retry_delay: float = 2.0
-
-
-@dataclass
-class TriggerServerConfig:
-    """Trigger API server configuration"""
-    host: str = "127.0.0.1"
-    port: int = 5050
-
-
-@dataclass
-class AimsLabServerConfig:
-    """AIMS LAB local server configuration (receives audio files)"""
+    """AIMS LAB server, reached over the per-PC tunnel."""
     base_url: str = "http://localhost:7000"
-    # Set to True to forward recordings to AIMS LAB server
-    # Disabled by default - enable when AIMS LAB server is running
-    forward_recordings: bool = False
-    # Delete local recording after successful forward
-    delete_after_forward: bool = True
+    api_prefix: str = "/api/v1"
+    request_timeout: int = 30
+    upload_timeout: int = 300
+    retry_backoff: tuple = (2.0, 8.0, 30.0, 120.0, 600.0)
+    client_cert_path: Optional[Path] = None
+    client_key_path: Optional[Path] = None
+    ca_bundle_path: Optional[Path] = None
+
+    def url(self, endpoint: str) -> str:
+        return f"{self.base_url.rstrip('/')}{self.api_prefix}{endpoint}"
+
+    @property
+    def uses_tls(self) -> bool:
+        return self.base_url.lower().startswith("https://")
 
 
-@dataclass
+@dataclass(frozen=True)
+class SecurityConfig:
+    """
+    Who is allowed to drive this recorder.
+
+    The browser is never trusted for identity. Doctor, hospital and patient come
+    from a CMED-signed grant; the local API key only proves the caller is the
+    installed CMED front end rather than an arbitrary page.
+    """
+    bind_host: str = "127.0.0.1"
+    bind_port: int = 5050
+    allowed_origins: frozenset = frozenset()
+    allowed_hosts: frozenset = frozenset()
+    local_api_key: str = ""
+    require_grant: bool = True
+    enable_docs: bool = False
+    grant_issuer: str = "cmed"
+    grant_audience: str = "aimscribe-recorder"
+    grant_public_key_path: Path = field(default_factory=lambda: data_dir() / "keys" / "cmed_grant_pub.pem")
+    receipt_public_key_path: Path = field(default_factory=lambda: data_dir() / "keys" / "aimslab_receipt_pub.pem")
+    device_key_path: Path = field(default_factory=lambda: data_dir() / "keys" / "device_ed25519.dpapi")
+    allow_plaintext_keystore: bool = False
+
+    def origin_allowed(self, origin: Optional[str]) -> bool:
+        # A missing or literal "null" Origin is rejected: sandboxed iframes and
+        # non-browser clients both present it, and neither should drive a recording.
+        return bool(origin) and origin in self.allowed_origins
+
+    def host_allowed(self, host: Optional[str]) -> bool:
+        return bool(host) and host.lower() in self.allowed_hosts
+
+
+@dataclass(frozen=True)
+class PauseConfig:
+    """Supervised pause. Longer pauses need a supervisor's authorisation."""
+    self_authorise_seconds: int = 300
+    reasons: tuple = (
+        "patient_declined",
+        "sensitive_personal_matter",
+        "non_clinical_interruption",
+        "other",
+    )
+
+
+@dataclass(frozen=True)
 class PathConfig:
-    """File and directory paths"""
-    temp_clips_dir: str = "temp_clips"
-    full_recordings_dir: str = "recordings"
-    logs_dir: str = "logs"
+    logs_dir: Path = field(default_factory=lambda: data_dir() / "logs")
+    state_dir: Path = field(default_factory=lambda: data_dir() / "state")
 
 
-@dataclass
+@dataclass(frozen=True)
+class OpsConfig:
+    heartbeat_seconds: int = 30
+    log_level: str = "INFO"
+    log_retention_days: int = 30
+    redact_logs: bool = True
+
+
+@dataclass(frozen=True)
 class Config:
-    """Main configuration class"""
-    audio: AudioConfig = field(default_factory=AudioConfig)
-    splitter: SplitterConfig = field(default_factory=SplitterConfig)
-    backend: BackendConfig = field(default_factory=BackendConfig)
-    trigger_server: TriggerServerConfig = field(default_factory=TriggerServerConfig)
-    aimslab_server: AimsLabServerConfig = field(default_factory=AimsLabServerConfig)
-    paths: PathConfig = field(default_factory=PathConfig)
+    audio: AudioConfig
+    segment: SegmentConfig
+    spool: SpoolConfig
+    backend: BackendConfig
+    security: SecurityConfig
+    pause: PauseConfig
+    paths: PathConfig
+    ops: OpsConfig
+    app_name: str = APP_NAME
+    app_version: str = APP_VERSION
+    protocol_version: int = PROTOCOL_VERSION
 
-    # Application info
-    app_name: str = "AIMScribe Recorder"
-    app_version: str = "1.0.0"
-
-    def __post_init__(self):
-        """Create necessary directories"""
-        os.makedirs(self.paths.temp_clips_dir, exist_ok=True)
-        os.makedirs(self.paths.full_recordings_dir, exist_ok=True)
-        os.makedirs(self.paths.logs_dir, exist_ok=True)
+    # ---- construction ----
 
     @classmethod
-    def from_env(cls) -> "Config":
-        """Load configuration from environment variables"""
-        config = cls()
+    def load(cls) -> "Config":
+        load_env_file(app_dir() / ".env")
 
-        if os.getenv("AIMSCRIBE_BACKEND_URL"):
-            config.backend.base_url = os.getenv("AIMSCRIBE_BACKEND_URL")
+        keys = data_dir() / "keys"
 
-        if os.getenv("AIMSLAB_SERVER_URL"):
-            config.aimslab_server.base_url = os.getenv("AIMSLAB_SERVER_URL")
+        audio = AudioConfig(
+            sample_rate=_int("AIMS_SAMPLE_RATE", 44100),
+            channels=_int("AIMS_CHANNELS", 1),
+            sample_width=_int("AIMS_SAMPLE_WIDTH", 2),
+            frames_per_buffer=_int("AIMS_FRAMES_PER_BUFFER", 2048),
+            input_device_index=_opt_int("AIMS_INPUT_DEVICE_INDEX"),
+        )
 
-        if os.getenv("TRIGGER_PORT"):
-            config.trigger_server.port = int(os.getenv("TRIGGER_PORT"))
+        segment = SegmentConfig(
+            min_seconds=_float("AIMS_SEGMENT_MIN_SECONDS", 170.0),
+            max_seconds=_float("AIMS_SEGMENT_MAX_SECONDS", 190.0),
+            silence_rms=_int("AIMS_SILENCE_RMS", 320),
+            silence_hold_seconds=_float("AIMS_SILENCE_HOLD_SECONDS", 1.0),
+        )
 
-        return config
+        spool = SpoolConfig(
+            directory=_path("AIMS_SPOOL_DIR", data_dir() / "spool"),
+            max_bytes=_int("AIMS_SPOOL_MAX_BYTES", 40 * 1024 ** 3),
+            warn_ratio=_float("AIMS_SPOOL_WARN_RATIO", 0.5),
+            critical_ratio=_float("AIMS_SPOOL_CRITICAL_RATIO", 0.8),
+            purge_grace_hours=_int("AIMS_PURGE_GRACE_HOURS", 24),
+        )
+
+        backoff = tuple(float(v) for v in _list("AIMS_RETRY_BACKOFF", "2,8,30,120,600"))
+        backend = BackendConfig(
+            base_url=_str("AIMS_BACKEND_URL", "http://localhost:7000"),
+            api_prefix=_str("AIMS_BACKEND_API_PREFIX", "/api/v1"),
+            request_timeout=_int("AIMS_REQUEST_TIMEOUT", 30),
+            upload_timeout=_int("AIMS_UPLOAD_TIMEOUT", 300),
+            retry_backoff=backoff or (2.0, 8.0, 30.0, 120.0, 600.0),
+            client_cert_path=Path(_str("AIMS_CLIENT_CERT_PATH")) if _str("AIMS_CLIENT_CERT_PATH") else None,
+            client_key_path=Path(_str("AIMS_CLIENT_KEY_PATH")) if _str("AIMS_CLIENT_KEY_PATH") else None,
+            ca_bundle_path=Path(_str("AIMS_CA_BUNDLE_PATH")) if _str("AIMS_CA_BUNDLE_PATH") else None,
+        )
+
+        security = SecurityConfig(
+            bind_host=_str("AIMS_BIND_HOST", "127.0.0.1"),
+            bind_port=_int("AIMS_BIND_PORT", 5050),
+            allowed_origins=frozenset(_list("AIMS_ALLOWED_ORIGINS")),
+            allowed_hosts=frozenset(h.lower() for h in _list(
+                "AIMS_ALLOWED_HOSTS", "localhost:5050,127.0.0.1:5050,[::1]:5050")),
+            local_api_key=_str("AIMS_LOCAL_API_KEY"),
+            require_grant=_bool("AIMS_REQUIRE_GRANT", True),
+            enable_docs=_bool("AIMS_ENABLE_DOCS", False),
+            grant_issuer=_str("AIMS_GRANT_ISSUER", "cmed"),
+            grant_audience=_str("AIMS_GRANT_AUDIENCE", "aimscribe-recorder"),
+            grant_public_key_path=_path("AIMS_GRANT_PUBLIC_KEY_PATH", keys / "cmed_grant_pub.pem"),
+            receipt_public_key_path=_path("AIMS_RECEIPT_PUBLIC_KEY_PATH", keys / "aimslab_receipt_pub.pem"),
+            device_key_path=keys / "device_ed25519.dpapi",
+            allow_plaintext_keystore=_bool("AIMS_ALLOW_PLAINTEXT_KEYSTORE", False),
+        )
+
+        pause = PauseConfig(
+            self_authorise_seconds=_int("AIMS_PAUSE_SELF_AUTHORISE_SECONDS", 300),
+        )
+
+        ops = OpsConfig(
+            heartbeat_seconds=_int("AIMS_HEARTBEAT_SECONDS", 30),
+            log_level=_str("AIMS_LOG_LEVEL", "INFO").upper(),
+            log_retention_days=_int("AIMS_LOG_RETENTION_DAYS", 30),
+            redact_logs=_bool("AIMS_REDACT_LOGS", True),
+        )
+
+        # Deliberately does not create directories: importing this module must
+        # have no side effects on disk, or tests and tooling end up provisioning
+        # %PROGRAMDATA% just by importing. main() calls ensure_directories().
+        return cls(
+            audio=audio, segment=segment, spool=spool, backend=backend,
+            security=security, pause=pause, paths=PathConfig(), ops=ops,
+        )
+
+    # ---- runtime helpers ----
+
+    def ensure_directories(self) -> None:
+        for directory in (self.spool.directory, self.paths.logs_dir,
+                          self.paths.state_dir, self.security.device_key_path.parent):
+            directory.mkdir(parents=True, exist_ok=True)
+
+    def validate(self) -> List[str]:
+        """
+        Return a list of problems that make this install unsafe to run.
+
+        Called at startup: the tray reports these and refuses to accept sessions
+        rather than running in a quietly insecure state.
+        """
+        problems: List[str] = []
+
+        if not self.security.allowed_origins:
+            problems.append(
+                "AIMS_ALLOWED_ORIGINS is empty - no browser origin may start a recording.")
+        if any("*" in origin for origin in self.security.allowed_origins):
+            problems.append("AIMS_ALLOWED_ORIGINS must list exact origins; wildcards are not allowed.")
+        if not self.security.local_api_key or self.security.local_api_key.startswith("change-me"):
+            problems.append("AIMS_LOCAL_API_KEY is unset or still the placeholder value.")
+        if self.security.require_grant and not self.security.grant_public_key_path.is_file():
+            problems.append(
+                f"Grant public key missing: {self.security.grant_public_key_path}")
+        if not self.security.receipt_public_key_path.is_file():
+            problems.append(
+                f"Purge-receipt public key missing: {self.security.receipt_public_key_path} - "
+                "local audio can never be safely deleted without it.")
+        if self.segment.max_seconds <= self.segment.min_seconds:
+            problems.append("AIMS_SEGMENT_MAX_SECONDS must exceed AIMS_SEGMENT_MIN_SECONDS.")
+        if self.audio.sample_width != 2:
+            problems.append("Only 16-bit PCM is supported (AIMS_SAMPLE_WIDTH=2).")
+
+        return problems
+
+    def production_warnings(self) -> List[str]:
+        """Settings that are legal but must not ship to a clinical PC."""
+        warnings: List[str] = []
+        if not self.backend.uses_tls:
+            warnings.append("Backend URL is not https - audio would cross the network in cleartext.")
+        if self.security.enable_docs:
+            warnings.append("AIMS_ENABLE_DOCS is true - the local API schema is browsable.")
+        if not self.security.require_grant:
+            warnings.append("AIMS_REQUIRE_GRANT is false - any allowed origin can start a recording.")
+        if self.security.allow_plaintext_keystore:
+            warnings.append("AIMS_ALLOW_PLAINTEXT_KEYSTORE is true - private keys are not DPAPI-wrapped.")
+        if not self.backend.client_cert_path:
+            warnings.append("No client certificate configured - mTLS is not in use.")
+        return warnings
+
+    def spool_seconds(self) -> float:
+        """How long the spool can buffer at the configured audio rate."""
+        return self.spool.max_bytes / max(1, self.audio.bytes_per_second)
 
 
-# Global configuration instance
-config = Config.from_env()
+config = Config.load()

@@ -38,3 +38,15 @@ temp_clips/*.wav
 
 # Claude
 .claude/
+
+# Agent secrets and local state — never commit these
+recorder/scripts/dev-keys/
+recorder/dist/
+recorder/build/
+*.dpapi
+*.pem
+*.key
+*.crt
+spool/
+*.aimspl
+journal.jsonl

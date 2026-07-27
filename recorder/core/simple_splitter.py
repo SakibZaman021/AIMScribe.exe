@@ -1,169 +1,270 @@
 """
-Simple Amplitude-Based Silence Splitter
-Splits audio clips between 2:50 and 3:10 minutes.
+Segmenter - cuts the audio stream into clips that upload as they are produced.
+
+A clip closes on a silence boundary once past the minimum length, or is forced at
+the maximum. Between those two points the segmenter watches for a sustained quiet
+patch so cuts land in a natural gap rather than mid-sentence.
+
+The important structural change from v1: this runs on **its own thread**, fed by a
+queue. Previously `process_chunk` ran on the PyAudio callback thread and wrote up
+to 12 MB of WAV synchronously inside it, which dropped frames at every clip
+boundary. Now the capture thread only enqueues; loudness maths and sealing happen
+here.
+
+Commands (flush, pause, stop) travel through the same queue as audio, so they are
+always processed after every chunk that preceded them. Ordering is what makes a
+pause boundary exact.
 """
-import os
-import wave
+from __future__ import annotations
+
 import logging
-import struct
-import math
-from typing import Optional, Callable
-from datetime import datetime
+import queue
+import threading
+from array import array
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class ClipInfo:
-    filepath: str
-    clip_number: int
-    start_time: datetime
-    end_time: datetime
-    duration_seconds: float
+# Prefer the C implementation where it exists. `audioop` is deprecated in 3.11 and
+# removed in 3.13, so the pure-Python fallback is not optional.
+try:  # pragma: no cover - depends on interpreter version
+    import audioop  # type: ignore[import-not-found]
+
+    def _rms(fragment: bytes, width: int) -> float:
+        return float(audioop.rms(fragment, width))
+
+except ImportError:  # pragma: no cover
+    def _rms(fragment: bytes, width: int) -> float:
+        if width != 2 or not fragment:
+            return 0.0
+        # ~150 µs per 2048-sample chunk, about 0.3% of one core at 44.1 kHz.
+        samples = array("h")
+        samples.frombytes(fragment[: len(fragment) - (len(fragment) % 2)])
+        if not samples:
+            return 0.0
+        total = 0
+        for value in samples:
+            total += value * value
+        return (total / len(samples)) ** 0.5
+
+
+@dataclass(frozen=True)
+class SealedSegment:
+    """What the segmenter hands back for spooling."""
+    pcm: bytes
+    captured_start_at: datetime
+    captured_end_at: datetime
+    rms_mean: float
     is_final: bool
 
 
-class SimpleSplitter:
+class _Command:
+    """Queue sentinel so commands are ordered against the audio that precedes them."""
+    __slots__ = ("kind", "done")
+
+    def __init__(self, kind: str):
+        self.kind = kind
+        self.done = threading.Event()
+
+
+class Segmenter:
+    """
+    Consumes raw PCM chunks and emits sealed segments.
+
+    `on_segment` is called on the segmenter thread. It is expected to do the disk
+    write (Spool.seal_segment) and return; uploading happens elsewhere.
+    """
+
     def __init__(
         self,
-        patient_id: str,
-        doctor_id: str,
-        hospital_id: str,
-        on_clip_ready: Callable[[ClipInfo], None],
-        sample_rate: int = 32000,
-        temp_dir: str = "temp_clips"
+        *,
+        sample_rate: int,
+        channels: int,
+        sample_width: int,
+        min_seconds: float,
+        max_seconds: float,
+        silence_rms: int,
+        silence_hold_seconds: float,
+        on_segment: Callable[[SealedSegment], None],
+        queue_depth: int = 512,
     ):
-        self.patient_id = patient_id
-        self.doctor_id = doctor_id
-        self.hospital_id = hospital_id
-        self.on_clip_ready = on_clip_ready
-        self.sample_rate = sample_rate
-        self.temp_dir = temp_dir
+        self.bytes_per_second = sample_rate * channels * sample_width
+        self.sample_width = sample_width
+        self.min_bytes = int(min_seconds * self.bytes_per_second)
+        self.max_bytes = int(max_seconds * self.bytes_per_second)
+        self.silence_rms = silence_rms
+        self.silence_hold_bytes = int(silence_hold_seconds * self.bytes_per_second)
+        self._on_segment = on_segment
 
-        # Configuration
-        self.min_duration = 170.0  # 2m 50s
-        self.max_duration = 190.0  # 3m 10s
-        self.silence_threshold_db = -40.0  # dB threshold for silence
-        self.min_silence_duration = 1.0    # seconds
+        self._queue: "queue.Queue" = queue.Queue(maxsize=queue_depth)
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
 
-        # State
-        self._buffer = []
-        self._clip_start_time = None
-        self._clip_number = 1
-        self._current_duration = 0.0
-        self._silence_counter = 0.0
-        self._running = False
+        # Segment being assembled. Byte counts are integers so duration never drifts.
+        self._buffer = bytearray()
+        self._silence_bytes = 0
+        self._rms_weighted_sum = 0.0
+        self._rms_samples = 0
+        self._segment_started_at: Optional[datetime] = None
 
-        os.makedirs(temp_dir, exist_ok=True)
-        logger.info(f"SimpleSplitter initialized for {patient_id}")
+        self.segments_emitted = 0
+        self.dropped_chunks = 0
 
-    def start(self, start_time: datetime):
-        self._running = True
-        self._clip_start_time = start_time
-        self._buffer = []
-        self._clip_number = 1
-        self._current_duration = 0.0
+    # ---- lifecycle ----
 
-    def stop(self):
-        self._running = False
-        # Save remaining audio as final clip
-        if self._buffer:
-            self._save_clip(is_final=True)
+    def start(self, started_at: Optional[datetime] = None) -> None:
+        self._segment_started_at = started_at or datetime.now(timezone.utc)
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="Segmenter", daemon=True)
+        self._thread.start()
 
-    def process_chunk(self, audio_data: bytes):
-        if not self._running:
-            return
+    def set_segment_start(self, when: datetime) -> None:
+        """
+        Move the current segment's start timestamp.
 
-        # Add to buffer
-        self._buffer.append(audio_data)
+        Used on resume: without it the next segment would be stamped as beginning
+        when the previous one ended, implying continuous audio across a pause.
+        """
+        self._segment_started_at = when
 
-        # Calculate duration (16-bit mono 32kHz: 64000 bytes/sec)
-        bytes_per_sec = self.sample_rate * 2
-        chunk_duration = len(audio_data) / bytes_per_sec
-        self._current_duration += chunk_duration
+    def submit(self, chunk: bytes) -> None:
+        """
+        Called from the capture thread. Raises queue.Full rather than blocking.
 
-        # 1. Check Min Duration (2:50)
-        if self._current_duration < self.min_duration:
-            return
+        AudioRecorder counts the Full case as an overrun; blocking here would stall
+        PortAudio and lose the same audio with worse timing.
+        """
+        self._queue.put_nowait(chunk)
 
-        # 2. Check Max Duration (3:10) - Force Split
-        if self._current_duration >= self.max_duration:
-            logger.info("Max duration reached (3:10). Forcing split.")
-            self._save_clip(is_final=False)
-            return
+    def flush(self, *, is_final: bool = False, timeout: float = 30.0) -> bool:
+        """
+        Seal whatever is buffered. Used at pause and at stop.
 
-        # 3. Check for Silence (Window: 2:50 - 3:10)
-        is_silent = self._is_silence(audio_data)
-
-        if is_silent:
-            self._silence_counter += chunk_duration
-        else:
-            self._silence_counter = 0.0
-
-        # If silence persists enough, split
-        if self._silence_counter >= self.min_silence_duration:
-            logger.info(f"Silence detected at {self._current_duration:.1f}s. Splitting.")
-            self._save_clip(is_final=False)
-            self._silence_counter = 0.0
-
-    def _is_silence(self, audio_data: bytes) -> bool:
-        """Calculate RMS amplitude to detect silence"""
+        Blocks until the segmenter has drained every chunk queued before this call,
+        so a pause boundary is exact rather than approximate.
+        """
+        command = _Command("final" if is_final else "flush")
         try:
-            count = len(audio_data) // 2
-            format_str = f"{count}h"
-            samples = struct.unpack(format_str, audio_data)
-
-            sum_squares = sum(s * s for s in samples)
-            rms = math.sqrt(sum_squares / count) if count > 0 else 0
-
-            if rms > 0:
-                db = 20 * math.log10(rms / 32768.0)
-            else:
-                db = -96.0
-
-            return db < self.silence_threshold_db
-
-        except Exception:
+            self._queue.put(command, timeout=5.0)
+        except queue.Full:
+            logger.error("Could not enqueue flush: segmenter queue is full")
             return False
+        return command.done.wait(timeout=timeout)
 
-    def _save_clip(self, is_final: bool):
-        """Save buffer to wav file and notify"""
-        if not self._buffer:
+    def stop(self, *, seal_remaining: bool = True, timeout: float = 30.0) -> None:
+        if self._thread is None:
+            return
+        if seal_remaining:
+            self.flush(is_final=True, timeout=timeout)
+        self._stop.set()
+        try:
+            self._queue.put_nowait(_Command("stop"))
+        except queue.Full:
+            pass
+        self._thread.join(timeout=timeout)
+        self._thread = None
+
+    # ---- worker ----
+
+    def _run(self) -> None:
+        logger.debug("Segmenter thread started")
+        while True:
+            try:
+                item = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                if self._stop.is_set():
+                    break
+                continue
+
+            if isinstance(item, _Command):
+                if item.kind in ("flush", "final"):
+                    self._seal(is_final=(item.kind == "final"))
+                    item.done.set()
+                    continue
+                if item.kind == "stop":
+                    item.done.set()
+                    break
+
+            self._consume(item)
+
+        logger.debug("Segmenter thread finished after %s segment(s)", self.segments_emitted)
+
+    def _consume(self, chunk: bytes) -> None:
+        self._buffer.extend(chunk)
+
+        level = _rms(chunk, self.sample_width)
+        self._rms_weighted_sum += level * len(chunk)
+        self._rms_samples += len(chunk)
+
+        size = len(self._buffer)
+
+        # Below the minimum, keep accumulating regardless of how quiet it is.
+        if size < self.min_bytes:
+            self._silence_bytes = 0
             return
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{self.patient_id}_{self.doctor_id}_{self.hospital_id}_clip{self._clip_number}_{timestamp}.wav"
-        filepath = os.path.join(self.temp_dir, filename)
+        # Hard cutoff so a continuous talker still produces regular clips.
+        if size >= self.max_bytes:
+            logger.debug("Segment reached maximum length; forcing a cut")
+            self._seal(is_final=False)
+            return
+
+        # Inside the window, cut on a sustained quiet patch.
+        if level < self.silence_rms:
+            self._silence_bytes += len(chunk)
+            if self._silence_bytes >= self.silence_hold_bytes:
+                logger.debug("Silence boundary at %.1f s; cutting",
+                             size / self.bytes_per_second)
+                self._seal(is_final=False)
+        else:
+            self._silence_bytes = 0
+
+    def _seal(self, *, is_final: bool) -> None:
+        if not self._buffer:
+            # A flush with nothing buffered is normal (pause immediately after a cut).
+            if is_final:
+                logger.debug("Final flush with an empty buffer; nothing to seal")
+            return
+
+        pcm = bytes(self._buffer)
+        started = self._segment_started_at or datetime.now(timezone.utc)
+        ended = started + timedelta(seconds=len(pcm) / self.bytes_per_second)
+        mean_rms = (self._rms_weighted_sum / self._rms_samples) if self._rms_samples else 0.0
+
+        # Reset before the callback: sealing writes to disk and could raise, and a
+        # retry must not re-emit audio that is already accounted for in the chain.
+        self._buffer = bytearray()
+        self._silence_bytes = 0
+        self._rms_weighted_sum = 0.0
+        self._rms_samples = 0
+        self._segment_started_at = ended
 
         try:
-            full_data = b"".join(self._buffer)
+            self._on_segment(SealedSegment(
+                pcm=pcm,
+                captured_start_at=started,
+                captured_end_at=ended,
+                rms_mean=mean_rms,
+                is_final=is_final,
+            ))
+            self.segments_emitted += 1
+        except Exception as exc:
+            # Losing a segment here means losing audio, so this is loud.
+            logger.critical("Failed to seal segment: %s", exc, exc_info=True)
+            raise
 
-            with wave.open(filepath, 'wb') as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(self.sample_rate)
-                wf.writeframes(full_data)
+    # ---- metrics ----
 
-            duration = len(full_data) / (self.sample_rate * 2)
+    @property
+    def queue_depth(self) -> int:
+        return self._queue.qsize()
 
-            info = ClipInfo(
-                filepath=filepath,
-                clip_number=self._clip_number,
-                start_time=self._clip_start_time,
-                end_time=datetime.now(),
-                duration_seconds=duration,
-                is_final=is_final
-            )
+    @property
+    def buffered_seconds(self) -> float:
+        return len(self._buffer) / self.bytes_per_second
 
-            logger.info(f"Saved clip {self._clip_number}: {filepath} ({duration:.1f}s)")
-            self.on_clip_ready(info)
 
-            # Reset state for next clip
-            self._buffer = []
-            self._current_duration = 0.0
-            self._clip_number += 1
-            self._clip_start_time = datetime.now()
-
-        except Exception as e:
-            logger.error(f"Failed to save clip: {e}")
+__all__ = ["Segmenter", "SealedSegment"]

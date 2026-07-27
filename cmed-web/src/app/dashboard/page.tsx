@@ -1,30 +1,50 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+/**
+ * Doctor dashboard.
+ *
+ * Rewritten for AIMScribe protocol 2. What changed and why:
+ *
+ *  - The browser no longer names the doctor or the hospital. It asks this app's
+ *    server for a signed grant, and the agent takes identity from that. A page
+ *    the doctor happens to visit can no longer start a recording, and a typo can
+ *    no longer file a consultation under the wrong hospital.
+ *  - Consent is captured before recording can begin, and travels in the grant.
+ *  - Pause is a first-class action with a mandatory reason, and a supervisor's
+ *    name once it runs long. The pause is written into the recording's hash chain,
+ *    so the gap in the audio is explained rather than unaccounted for.
+ *  - Commands are acknowledged; state changes arrive as events. v1 conflated the
+ *    two, so every change was processed two or three times.
+ */
+
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import axios from 'axios';
+import {
+  AimscribeClient,
+  AgentStatus,
+  PAUSE_REASONS,
+} from '@/lib/aimscribe-client';
 
-// WebSocket for local AIMScribe.exe (works from HTTPS)
-const RECORDER_WS = 'ws://localhost:5050/ws';
-
-// Backend can be local or cloud
 const BACKEND_API = process.env.NEXT_PUBLIC_BACKEND_URL
   ? `${process.env.NEXT_PUBLIC_BACKEND_URL}/api/v1`
   : 'http://localhost:6000/api/v1';
 
-// CMED Frontend URL for webhooks (where backend sends NER data)
-const CMED_WEBHOOK_BASE = typeof window !== 'undefined'
-  ? window.location.origin
-  : process.env.NEXT_PUBLIC_CMED_URL || 'http://localhost:3000';
+/** Beyond this the agent requires a supervisor's name. Matches its default. */
+const SUPERVISOR_THRESHOLD_SECONDS = 300;
 
 interface PatientData {
   patient_id: string;
   patient_name: string;
   age: string;
   gender: string;
-  doctor_id: string;
-  hospital_id: string;
   health_screening: Record<string, string>;
+}
+
+interface DoctorSession {
+  doctor_id: string;
+  doctor_name: string;
+  hospital_ids: string[];
 }
 
 interface NERFields {
@@ -43,542 +63,499 @@ interface NERFields {
 export default function DashboardPage() {
   const router = useRouter();
 
-  // Patient data from entry page
+  const [doctor, setDoctor] = useState<DoctorSession | null>(null);
+  const [hospitalId, setHospitalId] = useState('');
   const [patientData, setPatientData] = useState<PatientData | null>(null);
 
-  // WebSocket connection
-  const wsRef = useRef<WebSocket | null>(null);
-  const [wsConnected, setWsConnected] = useState(false);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const clientRef = useRef<AimscribeClient | null>(null);
+  const [connected, setConnected] = useState(false);
+  const [status, setStatus] = useState<AgentStatus | null>(null);
+  const [busy, setBusy] = useState(false);
 
-  // Recording state (synced from AIMScribe)
-  const [isRecording, setIsRecording] = useState(false);
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [recordingPatientId, setRecordingPatientId] = useState<string | null>(null);
-  const [recordingDuration, setRecordingDuration] = useState(0);
-  const [clipCount, setClipCount] = useState(0);
-  const recordingStartTimeRef = useRef<number | null>(null);
+  const [consentGiven, setConsentGiven] = useState(false);
+  const [showPause, setShowPause] = useState(false);
+  // Explicitly widened: PAUSE_REASONS is `as const`, so inference would pin this
+  // to the first literal and reject every other reason.
+  const [pauseReason, setPauseReason] = useState<string>(PAUSE_REASONS[0].value);
+  const [pauseDetail, setPauseDetail] = useState('');
+  const [supervisor, setSupervisor] = useState('');
+  const [expectedMinutes, setExpectedMinutes] = useState(2);
 
-  // NER data (received via WebSocket)
   const [nerData, setNerData] = useState<NERFields | null>(null);
   const [nerVersion, setNerVersion] = useState(0);
-
-  // Editable fields
   const [editedFields, setEditedFields] = useState<Record<string, string>>({});
-
-  // Error state
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
-  // Load patient data on mount
+  // ---- session and patient ----
+
   useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const response = await fetch('/api/auth/login', { credentials: 'same-origin' });
+        if (!response.ok) {
+          router.push('/login');
+          return;
+        }
+        const data = await response.json();
+        if (cancelled) return;
+        setDoctor(data);
+        setHospitalId(data.hospital_ids?.[0] ?? '');
+      } catch {
+        if (!cancelled) router.push('/login');
+      }
+    })();
+
+    // Demographics only. The doctor's identity is never taken from here - it
+    // comes from the server session, which the browser cannot edit.
     const stored = sessionStorage.getItem('patientData');
     if (stored) {
-      setPatientData(JSON.parse(stored));
+      try {
+        setPatientData(JSON.parse(stored));
+      } catch {
+        router.push('/');
+      }
     } else {
       router.push('/');
     }
+
+    return () => { cancelled = true; };
   }, [router]);
 
-  // WebSocket connection
-  const connectWebSocket = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+  // ---- agent connection ----
 
-    console.log('[AIMScribe] Connecting to', RECORDER_WS);
+  useEffect(() => {
+    const client = new AimscribeClient();
+    clientRef.current = client;
 
-    try {
-      const ws = new WebSocket(RECORDER_WS);
-
-      ws.onopen = () => {
-        console.log('[AIMScribe] Connected');
-        setWsConnected(true);
-        setError(null);
-        // Get current recording status from AIMScribe (does NOT affect recording)
-        ws.send(JSON.stringify({ command: 'status' }));
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const message = JSON.parse(event.data);
-          handleWsMessage(message);
-        } catch (e) {
-          console.error('[AIMScribe] Parse error:', e);
-        }
-      };
-
-      ws.onclose = () => {
-        console.log('[AIMScribe] Disconnected (recording continues in AIMScribe)');
-        setWsConnected(false);
-        wsRef.current = null;
-        // Reconnect after 3 seconds - recording is NOT affected
-        reconnectTimeoutRef.current = setTimeout(connectWebSocket, 3000);
-      };
-
-      ws.onerror = () => {
-        setError('Cannot connect to AIMScribe Recorder. Make sure it is running.');
-      };
-
-      wsRef.current = ws;
-    } catch (e) {
-      setError('Failed to connect to AIMScribe Recorder');
-    }
-  }, []);
-
-  // Handle WebSocket messages
-  const handleWsMessage = useCallback((message: any) => {
-    console.log('[AIMScribe] Received:', message.event || message.status, message);
-
-    const event = message.event || message.status;
-
-    switch (event) {
-      case 'status':
-        // Sync state from AIMScribe (page reload/reconnect)
-        setIsRecording(message.is_recording || false);
-        if (message.session_id) setSessionId(message.session_id);
-        if (message.patient_id) setRecordingPatientId(message.patient_id);
-        // Sync duration from AIMScribe
-        if (message.duration_seconds) {
-          setRecordingDuration(Math.floor(message.duration_seconds));
-          recordingStartTimeRef.current = Date.now() - (message.duration_seconds * 1000);
-        }
-        break;
-
-      case 'recording_started':
-        setIsRecording(true);
-        setSessionId(message.session_id);
-        setRecordingPatientId(message.patient_id);
-        setRecordingDuration(0);
-        recordingStartTimeRef.current = Date.now();
+    const unsubscribe = [
+      client.on('connection', ({ connected }: { connected: boolean }) => {
+        setConnected(connected);
+        if (connected) setError(null);
+      }),
+      client.on('status', (next: AgentStatus) => setStatus(next)),
+      client.on('recording_started', () => {
         setNerData(null);
         setNerVersion(0);
-        setClipCount(0);
-        setError(null);
-        break;
-
-      case 'recording_stopped':
-        setIsRecording(false);
-        recordingStartTimeRef.current = null;
-        break;
-
-      case 'clip_uploaded':
-        setClipCount(message.clip_number);
-        break;
-
-      case 'ner_ready':
-        // Real-time NER updates via WebSocket
-        if (message.version > nerVersion) {
+        setNotice('Recording started.');
+        client.refreshStatus();
+      }),
+      client.on('recording_paused', (message: any) => {
+        setNotice(`Paused: ${String(message.reason ?? '').replace(/_/g, ' ')}`);
+        client.refreshStatus();
+      }),
+      client.on('recording_resumed', () => {
+        setNotice('Recording resumed.');
+        client.refreshStatus();
+      }),
+      client.on('recording_stopped', () => {
+        setNotice('Recording stopped and queued for upload.');
+        client.refreshStatus();
+      }),
+      client.on('segment_sealed', () => client.refreshStatus()),
+      client.on('segment_committed', () => client.refreshStatus()),
+      client.on('ner_ready', (message: any) => {
+        if (Number(message.version ?? 0) > nerVersion) {
           setNerData(message.ner);
-          setNerVersion(message.version);
+          setNerVersion(Number(message.version));
         }
-        break;
+      }),
+      client.on('integrity_alert', (message: any) => {
+        // These are the doctor's business: a muted microphone means the
+        // consultation is not being captured.
+        setError(`AIMScribe: ${message.detail ?? message.alert_type}`);
+      }),
+      client.on('error', (message: any) => setError(message.message ?? 'AIMScribe error')),
+    ];
 
-      case 'error':
-        setError(message.message || 'Recording error');
-        break;
+    client.connect();
 
-      default:
-        // Handle responses with is_recording field
-        if (message.is_recording !== undefined) {
-          setIsRecording(message.is_recording);
-          if (message.session_id) setSessionId(message.session_id);
-          if (message.patient_id) setRecordingPatientId(message.patient_id);
-          if (message.duration_seconds) {
-            setRecordingDuration(Math.floor(message.duration_seconds));
-          }
-        }
-    }
-  }, [nerVersion]);
+    const ticker = setInterval(() => client.refreshStatus(), 5000);
 
-  // Connect WebSocket on mount
-  useEffect(() => {
-    connectWebSocket();
     return () => {
-      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-      // Don't close WebSocket on unmount - just clean up ref
-      // Recording continues in AIMScribe regardless
-      if (wsRef.current) wsRef.current.close();
+      clearInterval(ticker);
+      unsubscribe.forEach((off) => off());
+      // Recording continues in the agent regardless of this page.
+      client.disconnect();
     };
-  }, [connectWebSocket]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // Update recording duration timer (syncs with AIMScribe start time)
+  // ---- NER polling (fallback when the webhook cannot reach us) ----
+
   useEffect(() => {
-    if (!isRecording) return;
+    if (!status?.sessionId || !status.isRecording) return;
 
-    const interval = setInterval(() => {
-      if (recordingStartTimeRef.current) {
-        const elapsed = Math.floor((Date.now() - recordingStartTimeRef.current) / 1000);
-        setRecordingDuration(elapsed);
-      } else {
-        setRecordingDuration(prev => prev + 1);
-      }
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [isRecording]);
-
-  // Helper to convert any value to display string array
-  const toStringArray = (value: any): string[] => {
-    if (!value) return [];
-    if (Array.isArray(value)) {
-      return value.map(item => {
-        if (typeof item === 'string') return item;
-        if (typeof item === 'object') {
-          // Convert object to readable string (e.g., "Fever for 3 days")
-          const parts: string[] = [];
-          // Handle different object structures
-          if (item.complaint) parts.push(item.complaint);
-          if (item.duration) parts.push(`for ${item.duration}`);
-          if (item.name) parts.push(item.name);
-          if (item['Name (English)']) parts.push(item['Name (English)']);
-          // If no known keys, stringify all non-empty values
-          if (parts.length === 0) {
-            Object.entries(item).forEach(([k, v]) => {
-              if (v && typeof v === 'string') parts.push(v);
-            });
-          }
-          return parts.join(' ') || JSON.stringify(item);
-        }
-        return String(item);
-      });
-    }
-    if (typeof value === 'object') {
-      // Convert object to "key: value" strings, filtering empty values
-      return Object.entries(value)
-        .filter(([_, v]) => v && v !== '')
-        .map(([k, v]) => {
-          // Clean up key names (remove "(English)" suffix)
-          const cleanKey = k.replace(/\s*\(English\)|\s*\(Bengali\)/g, '');
-          return `${cleanKey}: ${v}`;
-        });
-    }
-    if (typeof value === 'string') return [value];
-    return [];
-  };
-
-  // Helper to normalize medications to table format
-  const normalizeMedications = (meds: any): any[] => {
-    if (!meds) return [];
-    if (!Array.isArray(meds)) return [];
-
-    return meds.map(med => {
-      if (typeof med === 'string') {
-        return { name: med, dose: '', frequency: '', duration: '', instruction: '' };
-      }
-      // Map NER field names to display field names
-      return {
-        name: med['Name (English)'] || med.name || med.Name || '',
-        dose: med['Dosage (English)'] || med.dose || med.Dosage || '',
-        frequency: med['Schedule (Bengali)'] || med.frequency || med.Schedule || '',
-        duration: med['Duration (Bengali)'] || med.duration || med.Duration || '',
-        instruction: med['Instruction (Bengali)'] || med.instruction || med.Instruction || '',
-      };
-    });
-  };
-
-  // Helper to normalize NER data format
-  const normalizeNerData = (fields: any): NERFields => {
-    if (!fields) return {};
-
-    const normalize = (value: any): { data: string[] } => {
-      return { data: toStringArray(value) };
-    };
-
-    return {
-      chief_complaints: normalize(fields.chief_complaints),
-      drug_history: normalize(fields.drug_history),
-      on_examination: normalize(fields.on_examination),
-      systemic_examination: normalize(fields.systemic_examination),
-      investigations: normalize(fields.investigations),
-      diagnosis: normalize(fields.diagnosis),
-      medications: { data: normalizeMedications(fields.medications) },
-      advice: normalize(fields.advice),
-      follow_up: normalize(fields.follow_up),
-      additional_notes: normalize(fields.additional_notes),
-    };
-  };
-
-  // Poll for NER from backend (fallback if webhook fails)
-  useEffect(() => {
-    if (!sessionId || !isRecording) return;
-
-    const pollInterval = setInterval(async () => {
+    const poll = setInterval(async () => {
       try {
-        // Try backend API first
-        const response = await axios.get(`${BACKEND_API}/ner/${sessionId}`);
+        const response = await axios.get(`${BACKEND_API}/ner/${status.sessionId}`);
         const data = response.data;
         if (data.version > nerVersion && data.fields) {
           setNerData(normalizeNerData(data.fields));
           setNerVersion(data.version);
         }
-      } catch (error) {
-        // Session might not exist yet, try CMED webhook store
+      } catch {
         try {
-          const webhookResponse = await axios.get(`/api/webhook/ner?session_id=${sessionId}`);
-          const webhookData = webhookResponse.data;
-          if (webhookData.version > nerVersion && webhookData.ner) {
-            setNerData(webhookData.ner);
-            setNerVersion(webhookData.version);
+          const fallback = await axios.get(`/api/webhook/ner?session_id=${status.sessionId}`);
+          if (fallback.data.version > nerVersion && fallback.data.ner) {
+            setNerData(fallback.data.ner);
+            setNerVersion(fallback.data.version);
           }
         } catch {
-          // Both failed, ignore
+          /* both unavailable; try again next tick */
         }
       }
-    }, 3000); // Poll every 3 seconds for faster updates
+    }, 4000);
 
-    return () => clearInterval(pollInterval);
-  }, [sessionId, isRecording, nerVersion]);
+    return () => clearInterval(poll);
+  }, [status?.sessionId, status?.isRecording, nerVersion]);
 
-  // Patient History button - Start recording for THIS patient
-  const handlePatientHistory = () => {
-    if (!patientData) return;
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      setError('Not connected to AIMScribe Recorder. Please wait...');
-      connectWebSocket();
-      return;
-    }
+  // ---- derived ----
 
-    // Send start command via WebSocket
-    // If already recording different patient, AIMScribe auto-stops previous and starts new
-    const message = {
-      command: 'start',
-      timestamp: new Date().toISOString(),
-      session: {
-        patient_id: patientData.patient_id,
-        patient_name: patientData.patient_name,
-        doctor_id: patientData.doctor_id,
-        hospital_id: patientData.hospital_id,
-        age: patientData.age,
-        gender: patientData.gender,
-      },
-      health_screening: patientData.health_screening,
-      callback: {
-        // Send NER webhooks to CMED frontend (this Vercel app), NOT the backend
-        ner_webhook_url: `${CMED_WEBHOOK_BASE}/api/webhook/ner`,
-      },
-    };
+  const recordingThisPatient = useMemo(
+    () => Boolean(status?.isRecording && patientData &&
+                  status.patientRef === patientData.patient_id),
+    [status, patientData]
+  );
 
-    console.log('[AIMScribe] Starting recording for:', patientData.patient_id);
-    wsRef.current.send(JSON.stringify(message));
-  };
+  const recordingOtherPatient = useMemo(
+    () => Boolean(status?.isRecording && patientData &&
+                  status.patientRef && status.patientRef !== patientData.patient_id),
+    [status, patientData]
+  );
 
-  // Save prescription
-  const handleSavePrescription = async () => {
-    if (!sessionId || !patientData) return;
+  const needsSupervisor = expectedMinutes * 60 > SUPERVISOR_THRESHOLD_SECONDS;
 
+  // ---- actions ----
+
+  const withBusy = async (action: () => Promise<unknown>) => {
+    setBusy(true);
+    setError(null);
     try {
-      const prescription = { ...nerData, ...editedFields };
-      await axios.post(`${BACKEND_API}/prescription`, {
-        session_id: sessionId,
-        doctor_id: patientData.doctor_id,
-        prescription: prescription,
-      });
-      alert('Prescription saved successfully!');
-    } catch (error) {
-      console.error('Failed to save prescription:', error);
-      alert('Failed to save prescription');
+      await action();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Something went wrong.');
+    } finally {
+      setBusy(false);
     }
   };
 
-  // Format duration
-  const formatDuration = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  const handleStart = () =>
+    withBusy(async () => {
+      if (!patientData) throw new Error('No patient selected.');
+      if (!consentGiven) {
+        throw new Error('Confirm the patient has agreed to be recorded before starting.');
+      }
+      await clientRef.current!.start({
+        patientRef: patientData.patient_id,
+        patientName: patientData.patient_name,
+        hospitalId,
+        consentObtained: true,
+        consentMethod: 'verbal_at_reception',
+      });
+    });
+
+  const handlePause = () =>
+    withBusy(async () => {
+      if (pauseReason === 'other' && !pauseDetail.trim()) {
+        throw new Error('Describe the reason when choosing "Other".');
+      }
+      if (needsSupervisor && !supervisor.trim()) {
+        throw new Error(
+          `A pause longer than ${SUPERVISOR_THRESHOLD_SECONDS / 60} minutes needs a supervisor's name.`
+        );
+      }
+      await clientRef.current!.pause({
+        reason: pauseReason,
+        reasonDetail: pauseDetail,
+        authorisedBy: supervisor,
+        expectedSeconds: expectedMinutes * 60,
+      });
+      setShowPause(false);
+      setPauseDetail('');
+      setSupervisor('');
+    });
+
+  const handleResume = () => withBusy(() => clientRef.current!.resume());
+
+  const handleStop = () =>
+    withBusy(async () => {
+      if (!window.confirm('Stop recording this consultation?')) return;
+      await clientRef.current!.stop();
+    });
+
+  const handleSavePrescription = () =>
+    withBusy(async () => {
+      if (!status?.sessionId || !doctor) throw new Error('No active session.');
+      await axios.post(`${BACKEND_API}/prescription`, {
+        session_id: status.sessionId,
+        doctor_id: doctor.doctor_id,
+        prescription: { ...nerData, ...editedFields },
+      });
+      setNotice('Prescription saved.');
+    });
+
+  const handleSignOut = async () => {
+    await fetch('/api/auth/login', { method: 'DELETE', credentials: 'same-origin' });
+    router.push('/login');
   };
 
-  // Render array field with editable textarea
-  const renderArrayField = (label: string, fieldKey: string, data: string[] | undefined) => {
-    // Use edited value if available, otherwise use NER data
-    const displayValue = editedFields[fieldKey] !== undefined
-      ? editedFields[fieldKey]
-      : (data?.join('\n') || '');
+  // ---- render helpers ----
 
+  const renderArrayField = (label: string, key: string, data: string[] | undefined) => {
+    const value = editedFields[key] !== undefined ? editedFields[key] : (data?.join('\n') || '');
     return (
-      <div className="mb-4">
+      <div className="mb-4" key={key}>
         <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label>
         <textarea
           className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none"
           rows={3}
-          value={displayValue}
-          onChange={(e) => setEditedFields(prev => ({ ...prev, [fieldKey]: e.target.value }))}
+          value={value}
+          onChange={(e) => setEditedFields((prev) => ({ ...prev, [key]: e.target.value }))}
           placeholder={`Enter ${label.toLowerCase()}...`}
         />
       </div>
     );
   };
 
-  if (!patientData) {
-    return <div className="p-8 text-center">Loading...</div>;
+  if (!patientData || !doctor) {
+    return <div className="p-8 text-center text-gray-500">Loading…</div>;
   }
 
-  // Check if recording is for current patient
-  const isRecordingCurrentPatient = isRecording && recordingPatientId === patientData.patient_id;
-  const isRecordingOtherPatient = isRecording && recordingPatientId && recordingPatientId !== patientData.patient_id;
+  const state = status?.state ?? 'unknown';
+  const uploadPending = status?.upload?.pending_segments ?? 0;
 
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Header */}
       <header className="bg-white shadow-sm border-b">
-        <div className="max-w-7xl mx-auto px-4 py-4 flex justify-between items-center">
+        <div className="max-w-7xl mx-auto px-4 py-4 flex flex-wrap gap-4 justify-between items-center">
           <div className="flex items-center space-x-4">
-            <h1 className="text-2xl font-bold text-gray-800">CMED - Doctor Dashboard</h1>
-            {/* Connection indicator */}
-            <div className={`flex items-center space-x-1 text-sm ${wsConnected ? 'text-green-600' : 'text-red-600'}`}>
-              <div className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-green-500' : 'bg-red-500'}`}></div>
-              <span>{wsConnected ? 'Connected' : 'Disconnected'}</span>
+            <h1 className="text-2xl font-bold text-gray-800">CMED — Doctor Dashboard</h1>
+            <div className={`flex items-center space-x-1 text-sm ${connected ? 'text-green-600' : 'text-red-600'}`}>
+              <span className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`} />
+              <span>{connected ? 'AIMScribe connected' : 'AIMScribe not running'}</span>
             </div>
           </div>
 
-          {/* Recording indicator - NO STOP BUTTON */}
-          {isRecording && (
-            <div className="flex items-center space-x-3 bg-red-100 px-4 py-2 rounded-lg">
-              <div className="w-3 h-3 bg-red-500 rounded-full recording-pulse"></div>
-              <span className="text-red-700 font-medium">
-                Recording: {formatDuration(recordingDuration)}
-                {clipCount > 0 && <span className="text-xs ml-2">({clipCount} clips)</span>}
-              </span>
-              {recordingPatientId && (
-                <span className="text-xs text-red-600">
-                  Patient: {recordingPatientId}
+          <div className="flex items-center gap-4">
+            {status?.isPaused && (
+              <div className="flex items-center gap-2 bg-amber-100 px-4 py-2 rounded-lg">
+                <span className="w-3 h-3 bg-amber-500 rounded-full" />
+                <span className="text-amber-800 font-medium">
+                  Paused — {status.pause?.reason?.replace(/_/g, ' ')}
                 </span>
-              )}
+              </div>
+            )}
+            {status?.isRecording && !status?.isPaused && (
+              <div className="flex items-center gap-2 bg-red-100 px-4 py-2 rounded-lg">
+                <span className="w-3 h-3 bg-red-500 rounded-full recording-pulse" />
+                <span className="text-red-700 font-medium">
+                  Recording {formatDuration(status.durationSeconds)}
+                </span>
+                <span className="text-xs text-red-600">{status.segmentCount} clips</span>
+              </div>
+            )}
+            <div className="text-sm text-gray-600">
+              {doctor.doctor_name || doctor.doctor_id}
+              <button onClick={handleSignOut} className="ml-3 text-blue-600 underline text-xs">
+                Sign out
+              </button>
             </div>
-          )}
+          </div>
         </div>
       </header>
 
-      {/* Error banner */}
       {error && (
         <div className="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 max-w-7xl mx-auto mt-4">
           <p>{error}</p>
           <button onClick={() => setError(null)} className="text-sm underline mt-1">Dismiss</button>
         </div>
       )}
+      {notice && !error && (
+        <div className="bg-blue-50 border-l-4 border-blue-400 text-blue-800 p-3 max-w-7xl mx-auto mt-4 text-sm">
+          <span>{notice}</span>
+          <button onClick={() => setNotice(null)} className="ml-3 underline">Dismiss</button>
+        </div>
+      )}
+      {uploadPending > 0 && (
+        <div className="bg-amber-50 border-l-4 border-amber-400 text-amber-800 p-3 max-w-7xl mx-auto mt-4 text-sm">
+          {uploadPending} clip(s) waiting to upload. Audio is held safely on this PC until they do.
+        </div>
+      )}
 
       <div className="max-w-7xl mx-auto px-4 py-6">
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
-          {/* Left Column - Patient Info */}
           <div className="lg:col-span-1 space-y-6">
-            {/* Patient Card */}
             <div className="bg-white rounded-xl shadow p-6">
               <h2 className="text-lg font-semibold text-gray-800 mb-4">Patient Information</h2>
-
               <div className="space-y-3">
-                <div className="flex justify-between">
-                  <span className="text-gray-600">ID:</span>
-                  <span className="font-medium">{patientData.patient_id}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-600">Name:</span>
-                  <span className="font-medium">{patientData.patient_name}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-600">Age:</span>
-                  <span className="font-medium">{patientData.age || '-'}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-600">Gender:</span>
-                  <span className="font-medium">{patientData.gender || '-'}</span>
-                </div>
+                <Row label="ID" value={patientData.patient_id} />
+                <Row label="Name" value={patientData.patient_name} />
+                <Row label="Age" value={patientData.age || '-'} />
+                <Row label="Gender" value={patientData.gender || '-'} />
               </div>
 
-              {/* Health Screening */}
               <div className="mt-6 pt-4 border-t">
                 <h3 className="text-sm font-semibold text-gray-700 mb-3">Health Screening</h3>
                 <div className="grid grid-cols-2 gap-2 text-sm">
-                  {patientData.health_screening.bp_systolic && (
-                    <div>
-                      <span className="text-gray-500">BP:</span>
-                      <span className="ml-1 font-medium">
-                        {patientData.health_screening.bp_systolic}/{patientData.health_screening.bp_diastolic}
-                      </span>
-                    </div>
+                  {patientData.health_screening?.bp_systolic && (
+                    <Fact label="BP" value={`${patientData.health_screening.bp_systolic}/${patientData.health_screening.bp_diastolic}`} />
                   )}
-                  {patientData.health_screening.pulse_rate && (
-                    <div>
-                      <span className="text-gray-500">Pulse:</span>
-                      <span className="ml-1 font-medium">{patientData.health_screening.pulse_rate}</span>
-                    </div>
+                  {patientData.health_screening?.pulse_rate && (
+                    <Fact label="Pulse" value={patientData.health_screening.pulse_rate} />
                   )}
-                  {patientData.health_screening.temperature && (
-                    <div>
-                      <span className="text-gray-500">Temp:</span>
-                      <span className="ml-1 font-medium">{patientData.health_screening.temperature}°C</span>
-                    </div>
+                  {patientData.health_screening?.temperature && (
+                    <Fact label="Temp" value={`${patientData.health_screening.temperature}°C`} />
                   )}
-                  {patientData.health_screening.height_cm && (
-                    <div>
-                      <span className="text-gray-500">Height:</span>
-                      <span className="ml-1 font-medium">{patientData.health_screening.height_cm} cm</span>
-                    </div>
+                  {patientData.health_screening?.height_cm && (
+                    <Fact label="Height" value={`${patientData.health_screening.height_cm} cm`} />
                   )}
-                  {patientData.health_screening.weight_kg && (
-                    <div>
-                      <span className="text-gray-500">Weight:</span>
-                      <span className="ml-1 font-medium">{patientData.health_screening.weight_kg} kg</span>
-                    </div>
+                  {patientData.health_screening?.weight_kg && (
+                    <Fact label="Weight" value={`${patientData.health_screening.weight_kg} kg`} />
                   )}
                 </div>
               </div>
 
-              {/* Patient History Button - TRIGGERS RECORDING */}
-              <div className="mt-6">
-                {isRecordingCurrentPatient ? (
-                  // Already recording this patient
-                  <div className="w-full py-3 rounded-lg bg-green-100 text-green-800 font-semibold text-center">
-                    Recording in Progress...
-                  </div>
-                ) : (
-                  <button
-                    onClick={handlePatientHistory}
-                    disabled={!wsConnected}
-                    className={`w-full py-3 rounded-lg font-semibold transition-colors ${
-                      !wsConnected
-                        ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                        : isRecordingOtherPatient
-                        ? 'bg-orange-500 text-white hover:bg-orange-600'
-                        : 'bg-green-600 text-white hover:bg-green-700'
-                    }`}
+              {doctor.hospital_ids.length > 1 && !status?.isRecording && (
+                <div className="mt-6 pt-4 border-t">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Consulting at
+                  </label>
+                  <select
+                    value={hospitalId}
+                    onChange={(e) => setHospitalId(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                   >
-                    {!wsConnected
-                      ? 'Connecting...'
-                      : isRecordingOtherPatient
-                      ? '📋 Start (Stops Previous Patient)'
-                      : '📋 Patient History'}
-                  </button>
+                    {doctor.hospital_ids.map((id) => (
+                      <option key={id} value={id}>{id}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* Consent - a precondition, not a formality */}
+              {!status?.isRecording && (
+                <div className="mt-6 pt-4 border-t">
+                  <label className="flex items-start gap-2 text-sm text-gray-700">
+                    <input
+                      type="checkbox"
+                      checked={consentGiven}
+                      onChange={(e) => setConsentGiven(e.target.checked)}
+                      className="mt-1"
+                    />
+                    <span>
+                      The patient has been told this consultation will be recorded and has agreed.
+                    </span>
+                  </label>
+                </div>
+              )}
+
+              <div className="mt-6 space-y-3">
+                {!status?.isRecording && (
+                  <>
+                    <button
+                      onClick={handleStart}
+                      disabled={!connected || busy || !consentGiven}
+                      className={`w-full py-3 rounded-lg font-semibold transition-colors ${
+                        !connected || !consentGiven
+                          ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                          : recordingOtherPatient
+                          ? 'bg-orange-500 text-white hover:bg-orange-600'
+                          : 'bg-green-600 text-white hover:bg-green-700'
+                      }`}
+                    >
+                      {!connected ? 'Waiting for AIMScribe…'
+                        : !consentGiven ? 'Confirm consent to continue'
+                        : recordingOtherPatient ? 'Start (stops previous patient)'
+                        : 'Start Consultation'}
+                    </button>
+                    <p className="text-xs text-gray-500 text-center">
+                      Recording runs in AIMScribe on this PC and continues if you close this page.
+                    </p>
+                  </>
                 )}
-                <p className="text-xs text-gray-500 mt-2 text-center">
-                  {isRecordingCurrentPatient
-                    ? 'Recording continues until next patient'
-                    : isRecordingOtherPatient
-                    ? 'Will stop recording for previous patient'
-                    : 'Click to start recording consultation'}
-                </p>
+
+                {recordingThisPatient && !status?.isPaused && (
+                  <>
+                    <button
+                      onClick={() => setShowPause(true)}
+                      disabled={busy}
+                      className="w-full py-3 rounded-lg font-semibold bg-amber-500 text-white hover:bg-amber-600"
+                    >
+                      Pause Recording
+                    </button>
+                    <button
+                      onClick={handleStop}
+                      disabled={busy}
+                      className="w-full py-2 rounded-lg font-medium border border-gray-300 text-gray-700 hover:bg-gray-50"
+                    >
+                      Stop Recording
+                    </button>
+                  </>
+                )}
+
+                {status?.isPaused && (
+                  <>
+                    <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-900">
+                      <div className="font-medium">Paused</div>
+                      <div className="text-xs mt-1">
+                        Reason: {status.pause?.reason?.replace(/_/g, ' ')}<br />
+                        Authorised by: {status.pause?.authorisedBy}
+                      </div>
+                      <div className="text-xs mt-2 text-amber-700">
+                        This pause is recorded, so the gap in the audio is accounted for.
+                      </div>
+                    </div>
+                    <button
+                      onClick={handleResume}
+                      disabled={busy}
+                      className="w-full py-3 rounded-lg font-semibold bg-green-600 text-white hover:bg-green-700"
+                    >
+                      Resume Recording
+                    </button>
+                  </>
+                )}
+
+                {recordingOtherPatient && (
+                  <p className="text-xs text-orange-600 text-center">
+                    AIMScribe is currently recording patient {status?.patientRef}.
+                  </p>
+                )}
               </div>
             </div>
 
-            {/* New Patient Button */}
             <button
               onClick={() => router.push('/')}
-              className="w-full py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 transition-colors"
+              className="w-full py-3 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700"
             >
               + New Patient
             </button>
           </div>
 
-          {/* Right Column - Prescription Fields */}
           <div className="lg:col-span-2 bg-white rounded-xl shadow p-6">
             <div className="flex justify-between items-center mb-6">
               <h2 className="text-lg font-semibold text-gray-800">Prescription</h2>
-              {nerVersion > 0 && (
-                <span className="text-sm text-green-600 bg-green-100 px-3 py-1 rounded-full">
-                  NER v{nerVersion}
-                </span>
-              )}
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-gray-500">state: {state}</span>
+                {nerVersion > 0 && (
+                  <span className="text-sm text-green-600 bg-green-100 px-3 py-1 rounded-full">
+                    NER v{nerVersion}
+                  </span>
+                )}
+              </div>
             </div>
 
+            {nerVersion > 0 && (
+              <p className="text-xs text-gray-500 mb-4 -mt-3">
+                Fields below are AI suggestions from the consultation audio. Review every
+                entry, especially medications, before saving.
+              </p>
+            )}
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {/* Left Fields */}
               <div>
                 {renderArrayField('Chief Complaints', 'chief_complaints', nerData?.chief_complaints?.data)}
                 {renderArrayField('Drug History', 'drug_history', nerData?.drug_history?.data)}
@@ -586,22 +563,19 @@ export default function DashboardPage() {
                 {renderArrayField('Systemic Examination (S/E)', 'systemic_examination', nerData?.systemic_examination?.data)}
                 {renderArrayField('Investigations', 'investigations', nerData?.investigations?.data)}
               </div>
-
-              {/* Right Fields */}
               <div>
                 {renderArrayField('Diagnosis', 'diagnosis', nerData?.diagnosis?.data)}
                 {renderArrayField('Advice', 'advice', nerData?.advice?.data)}
                 {renderArrayField('Follow Up', 'follow_up', nerData?.follow_up?.data)}
                 {renderArrayField('Additional Notes', 'additional_notes', nerData?.additional_notes?.data)}
 
-                {/* Medications Table */}
                 <div className="mb-4">
                   <label className="block text-sm font-medium text-gray-700 mb-1">Medications</label>
-                  <div className="border rounded-lg overflow-hidden">
+                  <div className="border rounded-lg overflow-x-auto">
                     <table className="w-full text-sm">
                       <thead className="bg-gray-50">
                         <tr>
-                          <th className="px-2 py-1 text-left">Medicine Name</th>
+                          <th className="px-2 py-1 text-left">Medicine</th>
                           <th className="px-2 py-1 text-left">Dosage</th>
                           <th className="px-2 py-1 text-left">Schedule</th>
                           <th className="px-2 py-1 text-left">Duration</th>
@@ -609,7 +583,7 @@ export default function DashboardPage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {nerData?.medications?.data && nerData.medications.data.length > 0 ? (
+                        {nerData?.medications?.data?.length ? (
                           nerData.medications.data.map((med: any, idx: number) => (
                             <tr key={idx} className="border-t hover:bg-gray-50">
                               <td className="px-2 py-2 font-medium">{med.name || '-'}</td>
@@ -633,16 +607,16 @@ export default function DashboardPage() {
               </div>
             </div>
 
-            {/* Action Buttons */}
             <div className="flex justify-end space-x-4 mt-6 pt-4 border-t">
               <button
                 onClick={handleSavePrescription}
-                disabled={!sessionId}
+                disabled={!status?.sessionId || busy}
                 className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
               >
                 Save Prescription
               </button>
               <button
+                onClick={() => window.print()}
                 className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
               >
                 Print
@@ -651,7 +625,180 @@ export default function DashboardPage() {
           </div>
         </div>
       </div>
+
+      {/* Pause dialog - a reason is mandatory, which is what makes the gap defensible */}
+      {showPause && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
+            <h3 className="text-lg font-semibold text-gray-800">Pause Recording</h3>
+            <p className="text-sm text-gray-600 mt-1">
+              The pause, its reason, and who authorised it are recorded with the
+              consultation.
+            </p>
+
+            <label className="block text-sm font-medium text-gray-700 mt-4 mb-1">Reason</label>
+            <select
+              value={pauseReason}
+              onChange={(e) => setPauseReason(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+            >
+              {PAUSE_REASONS.map((reason) => (
+                <option key={reason.value} value={reason.value}>{reason.label}</option>
+              ))}
+            </select>
+
+            <label className="block text-sm font-medium text-gray-700 mt-4 mb-1">
+              Detail {pauseReason === 'other' && <span className="text-red-600">*</span>}
+            </label>
+            <textarea
+              rows={2}
+              value={pauseDetail}
+              onChange={(e) => setPauseDetail(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+              placeholder="Optional note for the record"
+            />
+
+            <label className="block text-sm font-medium text-gray-700 mt-4 mb-1">
+              Expected length
+            </label>
+            <select
+              value={expectedMinutes}
+              onChange={(e) => setExpectedMinutes(Number(e.target.value))}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+            >
+              {[1, 2, 5, 10, 20].map((minutes) => (
+                <option key={minutes} value={minutes}>{minutes} minute(s)</option>
+              ))}
+            </select>
+
+            {needsSupervisor && (
+              <div className="mt-4">
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Authorising supervisor <span className="text-red-600">*</span>
+                </label>
+                <input
+                  value={supervisor}
+                  onChange={(e) => setSupervisor(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                  placeholder="Supervisor name or ID"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Required for pauses over {SUPERVISOR_THRESHOLD_SECONDS / 60} minutes.
+                </p>
+              </div>
+            )}
+
+            <div className="flex justify-end gap-3 mt-6">
+              <button
+                onClick={() => setShowPause(false)}
+                className="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handlePause}
+                disabled={busy}
+                className="px-4 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 disabled:bg-gray-300"
+              >
+                Pause Recording
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
-// Force redeploy Thu, Apr 30, 2026  1:11:38 AM
+
+// ============================================================
+// Small presentational helpers
+// ============================================================
+
+function Row({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex justify-between">
+      <span className="text-gray-600">{label}:</span>
+      <span className="font-medium">{value}</span>
+    </div>
+  );
+}
+
+function Fact({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <span className="text-gray-500">{label}:</span>
+      <span className="ml-1 font-medium">{value}</span>
+    </div>
+  );
+}
+
+function formatDuration(seconds: number): string {
+  const total = Math.floor(seconds || 0);
+  const minutes = Math.floor(total / 60);
+  return `${String(minutes).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
+// ============================================================
+// NER normalisation - the backend returns several shapes
+// ============================================================
+
+function toStringArray(value: any): string[] {
+  if (!value) return [];
+  if (Array.isArray(value)) {
+    return value.map((item) => {
+      if (typeof item === 'string') return item;
+      if (item && typeof item === 'object') {
+        const parts: string[] = [];
+        if (item.complaint) parts.push(item.complaint);
+        if (item.duration) parts.push(`for ${item.duration}`);
+        if (item.name) parts.push(item.name);
+        if (item['Name (English)']) parts.push(item['Name (English)']);
+        if (!parts.length) {
+          Object.values(item).forEach((v) => {
+            if (typeof v === 'string' && v) parts.push(v);
+          });
+        }
+        return parts.join(' ') || JSON.stringify(item);
+      }
+      return String(item);
+    });
+  }
+  if (typeof value === 'object') {
+    return Object.entries(value)
+      .filter(([, v]) => v && v !== '')
+      .map(([k, v]) => `${k.replace(/\s*\((English|Bengali)\)/g, '')}: ${v}`);
+  }
+  return [String(value)];
+}
+
+function normalizeMedications(meds: any): any[] {
+  if (!Array.isArray(meds)) return [];
+  return meds.map((med) =>
+    typeof med === 'string'
+      ? { name: med, dose: '', frequency: '', duration: '', instruction: '' }
+      : {
+          name: med['Name (English)'] || med.name || med.Name || '',
+          dose: med['Dosage (English)'] || med.dose || med.Dosage || '',
+          frequency: med['Schedule (Bengali)'] || med.frequency || med.Schedule || '',
+          duration: med['Duration (Bengali)'] || med.duration || med.Duration || '',
+          instruction: med['Instruction (Bengali)'] || med.instruction || med.Instruction || '',
+        }
+  );
+}
+
+function normalizeNerData(fields: any): NERFields {
+  if (!fields) return {};
+  const wrap = (value: any) => ({ data: toStringArray(value) });
+  return {
+    chief_complaints: wrap(fields.chief_complaints),
+    drug_history: wrap(fields.drug_history),
+    on_examination: wrap(fields.on_examination),
+    systemic_examination: wrap(fields.systemic_examination),
+    investigations: wrap(fields.investigations),
+    diagnosis: wrap(fields.diagnosis),
+    medications: { data: normalizeMedications(fields.medications) },
+    advice: wrap(fields.advice),
+    follow_up: wrap(fields.follow_up),
+    additional_notes: wrap(fields.additional_notes),
+  };
+}
