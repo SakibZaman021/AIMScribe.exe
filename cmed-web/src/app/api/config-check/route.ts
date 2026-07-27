@@ -7,9 +7,12 @@
  * This exists because a misconfigured deployment is indistinguishable from a
  * working one from the outside: recording simply refuses to start, with a
  * message that reads like user error.
+ *
+ * There is no doctor list here. Doctors are bound to machines at enrolment, so
+ * the register is a property of the fleet rather than of this app - query
+ * `v_doctors` in the database to see it.
  */
 import { NextResponse } from 'next/server';
-import { doctorRegister } from '@/lib/doctors';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -17,22 +20,9 @@ export const dynamic = 'force-dynamic';
 export async function GET() {
   const grant = process.env.AIMS_GRANT_PRIVATE_KEY ?? '';
   const webhook = process.env.AIMSCRIBE_WEBHOOK_SECRET ?? '';
-  const register = doctorRegister();
 
   return NextResponse.json({
-    ok: register.length > 0 && grant.includes('BEGIN PRIVATE KEY'),
-
-    doctors: {
-      configured: register.length > 0,
-      count: register.length,
-      // Identifiers and names only. There are no credentials here to leak:
-      // doctors are selected, not authenticated.
-      register: register,
-      note:
-        register.length === 0
-          ? 'AIMS_DOCTORS is not set. No recording can be attributed to anyone.'
-          : 'Format: DR001:Dr Name,DR002:Dr Other',
-    },
+    ok: grant.includes('BEGIN PRIVATE KEY'),
 
     grant_key: {
       set: Boolean(grant),
@@ -42,14 +32,22 @@ export async function GET() {
       // line and fails when the first grant is signed, not at startup.
       has_real_newlines: grant.includes('\n'),
       has_escaped_newlines: grant.includes('\\n'),
+      note: 'Without this, no recording can be authorised.',
     },
 
-    webhook_secret: { set: Boolean(webhook), length: webhook.length },
+    webhook_secret: {
+      set: Boolean(webhook),
+      length: webhook.length,
+      note: 'Must match the backend, or NER webhooks are rejected.',
+    },
 
     grant_issuer: process.env.AIMS_GRANT_ISSUER ?? '(default) cmed',
     grant_audience: process.env.AIMS_GRANT_AUDIENCE ?? '(default) aimscribe-recorder',
     backend_url: process.env.NEXT_PUBLIC_BACKEND_URL ?? '(not set)',
     recorder_ws: process.env.NEXT_PUBLIC_RECORDER_WS ?? '(default) ws://localhost:5050/ws',
-    hospital_id: process.env.NEXT_PUBLIC_HOSPITAL_ID ?? '(default) HOSP001',
+
+    doctors:
+      'Not configured here. Each PC is enrolled to one doctor by an ' +
+      'administrator; see v_doctors and v_doctor_activity in the database.',
   });
 }

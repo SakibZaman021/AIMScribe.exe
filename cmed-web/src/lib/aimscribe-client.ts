@@ -136,7 +136,6 @@ export class AimscribeClient {
    * a recording on its own, even though it now names the doctor.
    */
   async start(options: {
-    doctorId: string;
     patientRef: string;
     patientName?: string;
     hospitalId?: string;
@@ -151,9 +150,7 @@ export class AimscribeClient {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        doctor_id: options.doctorId,
         patient_ref: options.patientRef,
-        hospital_id: options.hospitalId,
         consent_obtained: options.consentObtained,
         consent_method: options.consentMethod ?? 'verbal_at_reception',
       }),

@@ -4,23 +4,20 @@
  * Issues the signed authorisation the AIMScribe agent needs before it will record.
  * The agent will not start without one, and only this route can produce one.
  *
- * There is no doctor login. The doctor is selected on the page and checked
- * against the register in `AIMS_DOCTORS`, so the value is a real person rather
- * than free text - but it is a selection, not proof of who is at the keyboard.
+ * There is no doctor login and the browser never names a doctor. Identity
+ * belongs to the machine: an administrator enrols each PC to one doctor at one
+ * hospital, and the agent takes both from that enrolment. The page chooses the
+ * patient and nothing else.
  *
- * Two things still constrain a recording, and neither is in the browser's gift:
+ * This route still matters, because the agent refuses to record without a grant
+ * - so a random page the doctor visits cannot start a recording, even though
+ * this one no longer proves who is asking.
  *
- *   hospital  The agent cross-checks the grant's hospital against the hospital
- *             its device was enrolled at (session_controller.py) and raises an
- *             integrity alert on mismatch. A page cannot file a consultation
- *             under a hospital the machine does not belong to.
- *
- *   consent   Required here, again on the agent, and again by a CHECK
- *             constraint in the database.
+ * Consent is required here, again on the agent, and again by a CHECK constraint
+ * in the database.
  */
 import { NextRequest, NextResponse } from 'next/server';
 import { mintGrant, assertSafeIdentifier } from '@/lib/grant';
-import { resolveDoctor } from '@/lib/doctors';
 
 // Node runtime: grant signing uses Ed25519 via jose, and the private key must
 // never be exposed to an edge deployment we do not control.
@@ -28,7 +25,6 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 interface GrantRequestBody {
-  doctor_id?: string;
   patient_ref?: string;
   hospital_id?: string;
   consent_obtained?: boolean;
@@ -43,14 +39,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Invalid request body.' }, { status: 400 });
   }
 
-  const doctor = resolveDoctor(String(body.doctor_id ?? '').trim());
-  if (!doctor) {
-    return NextResponse.json(
-      { error: 'Select a doctor from the list before starting a recording.' },
-      { status: 400 }
-    );
-  }
-
   if (!body.consent_obtained) {
     return NextResponse.json(
       { error: "Record the patient's consent before starting a recording." },
@@ -59,12 +47,8 @@ export async function POST(request: NextRequest) {
   }
 
   let patientRef: string;
-  let hospitalId: string;
   try {
     patientRef = assertSafeIdentifier(String(body.patient_ref ?? ''), 'patient_ref');
-    // Reaches a filesystem path on the archive volume, so it is validated to the
-    // same standard as the patient reference.
-    hospitalId = assertSafeIdentifier(String(body.hospital_id ?? ''), 'hospital_id');
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Invalid identifier.' },
@@ -73,22 +57,20 @@ export async function POST(request: NextRequest) {
   }
 
   try {
+    // Doctor and hospital are left empty on purpose: this server does not know
+    // them and must not guess. The agent fills both from its enrolment, and
+    // flags a grant that disagrees.
     const { grant, expiresIn } = await mintGrant({
-      doctorId: doctor.doctor_id,
-      doctorName: doctor.name,
-      hospitalId,
+      doctorId: '',
+      doctorName: '',
+      hospitalId: '',
       patientRef,
       consentObtained: true,
       consentMethod: String(body.consent_method ?? 'verbal_at_reception').slice(0, 64),
     });
 
     return NextResponse.json(
-      {
-        grant,
-        expires_in: expiresIn,
-        doctor_id: doctor.doctor_id,
-        hospital_id: hospitalId,
-      },
+      { grant, expires_in: expiresIn },
       { headers: { 'Cache-Control': 'no-store' } }
     );
   } catch (error) {

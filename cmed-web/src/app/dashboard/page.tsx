@@ -41,15 +41,7 @@ interface PatientData {
   health_screening: Record<string, string>;
 }
 
-interface Doctor {
-  doctor_id: string;
-  name: string;
-}
 
-// Which hospital this consultation belongs to. The agent cross-checks it
-// against the hospital its device was enrolled at and refuses a mismatch, so
-// this cannot misfile a recording - but it does have to be set.
-const DEFAULT_HOSPITAL = process.env.NEXT_PUBLIC_HOSPITAL_ID || 'HOSP001';
 
 interface NERFields {
   chief_complaints?: { data: string[] };
@@ -67,9 +59,6 @@ interface NERFields {
 export default function DashboardPage() {
   const router = useRouter();
 
-  const [register, setRegister] = useState<Doctor[]>([]);
-  const [doctor, setDoctor] = useState<Doctor | null>(null);
-  const [hospitalId, setHospitalId] = useState(DEFAULT_HOSPITAL);
   const [patientData, setPatientData] = useState<PatientData | null>(null);
 
   const clientRef = useRef<AimscribeClient | null>(null);
@@ -92,37 +81,13 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  // ---- doctor register and patient ----
+  // ---- patient ----
+  //
+  // The doctor and hospital are not fetched or chosen here. They arrive with
+  // the agent's status, from the enrolment an administrator performed on this
+  // machine, so the page displays them rather than deciding them.
 
   useEffect(() => {
-    let cancelled = false;
-
-    (async () => {
-      try {
-        const response = await fetch('/api/doctors', { credentials: 'same-origin' });
-        const data = await response.json();
-        if (cancelled) return;
-
-        const doctors: Doctor[] = data.doctors ?? [];
-        setRegister(doctors);
-
-        if (doctors.length === 0) {
-          setError(
-            'No doctors are configured. Set AIMS_DOCTORS before recording, ' +
-            'or the consultation cannot be attributed to anyone.'
-          );
-          return;
-        }
-
-        // Remember the last choice per browser. Convenience only - it is not a
-        // credential and confers nothing.
-        const remembered = localStorage.getItem('aims_doctor_id');
-        setDoctor(doctors.find((d) => d.doctor_id === remembered) ?? doctors[0]);
-      } catch {
-        if (!cancelled) setError('Could not load the doctor list.');
-      }
-    })();
-
     const stored = sessionStorage.getItem('patientData');
     if (stored) {
       try {
@@ -134,7 +99,6 @@ export default function DashboardPage() {
       router.push('/');
     }
 
-    return () => { cancelled = true; };
   }, [router]);
 
   // ---- agent connection ----
@@ -258,16 +222,12 @@ export default function DashboardPage() {
   const handleStart = () =>
     withBusy(async () => {
       if (!patientData) throw new Error('No patient selected.');
-      if (!doctor) throw new Error('Select the doctor conducting this consultation.');
       if (!consentGiven) {
         throw new Error('Confirm the patient has agreed to be recorded before starting.');
       }
-      localStorage.setItem('aims_doctor_id', doctor.doctor_id);
       await clientRef.current!.start({
-        doctorId: doctor.doctor_id,
         patientRef: patientData.patient_id,
         patientName: patientData.patient_name,
-        hospitalId,
         consentObtained: true,
         consentMethod: 'verbal_at_reception',
       });
@@ -304,10 +264,10 @@ export default function DashboardPage() {
 
   const handleSavePrescription = () =>
     withBusy(async () => {
-      if (!status?.sessionId || !doctor) throw new Error('No active session.');
+      if (!status?.sessionId) throw new Error('No active session.');
       await axios.post(`${BACKEND_API}/prescription`, {
         session_id: status.sessionId,
-        doctor_id: doctor.doctor_id,
+        doctor_id: status.doctorId ?? '',
         prescription: { ...nerData, ...editedFields },
       });
       setNotice('Prescription saved.');
@@ -331,7 +291,7 @@ export default function DashboardPage() {
     );
   };
 
-  if (!patientData || !doctor) {
+  if (!patientData) {
     return <div className="p-8 text-center text-gray-500">Loading…</div>;
   }
 
@@ -368,30 +328,13 @@ export default function DashboardPage() {
                 <span className="text-xs text-red-600">{status.segmentCount} clips</span>
               </div>
             )}
-            {/* Who this consultation is recorded against. Locked once recording
-                starts: the doctor is written into the signed chain at open, and
-                changing it mid-session would make the file disagree with it. */}
-            <div className="flex items-center gap-2 text-sm text-gray-600">
-              <label htmlFor="doctor" className="text-gray-500">Doctor</label>
-              <select
-                id="doctor"
-                className="px-2 py-1 border border-gray-300 rounded-lg disabled:bg-gray-100 disabled:text-gray-500"
-                value={doctor.doctor_id}
-                disabled={status?.isRecording}
-                onChange={(e) => {
-                  const chosen = register.find((d) => d.doctor_id === e.target.value);
-                  if (chosen) {
-                    setDoctor(chosen);
-                    localStorage.setItem('aims_doctor_id', chosen.doctor_id);
-                  }
-                }}
-              >
-                {register.map((d) => (
-                  <option key={d.doctor_id} value={d.doctor_id}>
-                    {d.name} ({d.doctor_id})
-                  </option>
-                ))}
-              </select>
+            {/* Who this machine is enrolled to. Set by an administrator at
+                enrolment; the page cannot change it and never sends it. */}
+            <div className="text-sm text-gray-600">
+              {status?.doctorId ?? '—'}
+              {status?.hospitalId && (
+                <span className="text-gray-400"> · {status.hospitalId}</span>
+              )}
             </div>
           </div>
         </div>
@@ -455,7 +398,7 @@ export default function DashboardPage() {
               <div className="mt-6 pt-4 border-t">
                 <div className="text-sm font-medium text-gray-700">Consulting at</div>
                 <div className="text-sm text-gray-600 mt-1">
-                  {status?.hospitalId || hospitalId}
+                  {status?.hospitalId ?? 'not enrolled'}
                 </div>
               </div>
 

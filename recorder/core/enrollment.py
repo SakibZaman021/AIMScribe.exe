@@ -59,6 +59,10 @@ class EnrollmentError(RuntimeError):
 class DeviceIdentity:
     device_id: str
     hospital_id: str
+    # Whose machine this is. Set by an administrator at enrolment and never
+    # afterwards, so a consultation is attributed by the machine that recorded
+    # it rather than by whatever a web page claimed.
+    doctor_id: str
     enrolled_at: str
     backend_url: str
     key_fingerprint: str
@@ -71,6 +75,9 @@ class DeviceIdentity:
         return cls(
             device_id=str(data["device_id"]),
             hospital_id=str(data["hospital_id"]),
+            # Absent on devices enrolled before the doctor moved onto the
+            # machine. They re-enrol; recording refuses rather than guessing.
+            doctor_id=str(data.get("doctor_id", "")),
             enrolled_at=str(data.get("enrolled_at", "")),
             backend_url=str(data.get("backend_url", "")),
             key_fingerprint=str(data.get("key_fingerprint", "")),
@@ -220,9 +227,17 @@ async def enroll(cfg, device_key: DeviceKey, token: str, *, ssl_context=None) ->
 
     device_id = data.get("device_id")
     hospital_id = data.get("hospital_id")
+    doctor_id = data.get("doctor_id")
     device_token = data.get("device_token")
     if not device_id or not hospital_id:
         raise EnrollmentError("enrollment response did not include device_id and hospital_id")
+    if not doctor_id:
+        # Recording without a doctor produces audio nobody can attribute, which
+        # is worse than recording that refused to start: the failure is silent
+        # and only discovered when someone needs the file.
+        raise EnrollmentError(
+            "enrollment response did not name a doctor. Mint the token with a "
+            "doctor_id: POST /api/v2/admin/enrollment-token")
     if not device_token:
         raise EnrollmentError("enrollment response did not include a device token")
 
@@ -234,6 +249,7 @@ async def enroll(cfg, device_key: DeviceKey, token: str, *, ssl_context=None) ->
     identity = DeviceIdentity(
         device_id=str(device_id),
         hospital_id=str(hospital_id),
+        doctor_id=str(doctor_id),
         enrolled_at=crypto.iso_utc(datetime.now(timezone.utc)),
         backend_url=cfg.backend.base_url,
         key_fingerprint=device_key.fingerprint(),
@@ -252,7 +268,8 @@ async def enroll(cfg, device_key: DeviceKey, token: str, *, ssl_context=None) ->
     except OSError as exc:
         logger.warning("Could not remove the used enrollment token: %s", exc)
 
-    logger.info("Enrolled as device %s at hospital %s", identity.device_id, identity.hospital_id)
+    logger.info("Enrolled as device %s for doctor %s at hospital %s",
+                identity.device_id, identity.doctor_id, identity.hospital_id)
     return identity
 
 

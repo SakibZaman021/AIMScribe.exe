@@ -144,13 +144,21 @@ class Runtime:
         if self.identity is not None:
             self.controller.device_id = self.identity.device_id
             self.controller.hospital_id = self.identity.hospital_id
+            self.controller.doctor_id = self.identity.doctor_id
 
         await self.controller.start()
         self.ws.set_controller(self.controller)
 
-        logger.info("Agent ready - device %s (%s), spool holds %.1f h",
+        logger.info("Agent ready - %s at %s, device %s (%s), spool holds %.1f h",
+                    self.identity.doctor_id if self.identity else "NO DOCTOR",
+                    self.identity.hospital_id if self.identity else "NO HOSPITAL",
                     self.identity.device_id if self.identity else "UNENROLLED",
                     self.device_key.fingerprint(), self.cfg.spool_seconds() / 3600)
+
+        if self.identity is not None and not self.identity.doctor_id:
+            logger.critical(
+                "This device is enrolled but no doctor is assigned to it. Recording "
+                "will refuse to start. Re-enrol with a token minted for a doctor.")
         for problem in self.problems:
             logger.critical("CONFIGURATION PROBLEM: %s", problem)
         for warning in self.warnings:

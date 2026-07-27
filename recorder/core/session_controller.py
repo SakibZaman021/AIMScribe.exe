@@ -108,6 +108,9 @@ class SessionController:
         # this machine is not enrolled and must not record.
         self.device_id: str = ""
         self.hospital_id: str = ""
+        # Bound at enrolment by an administrator. Never read from a grant,
+        # a page, or anything else the doctor's browser can influence.
+        self.doctor_id: str = ""
         self.last_alert: str = ""
 
     # ---- startup / shutdown ----
@@ -171,17 +174,33 @@ class SessionController:
                     "This PC is not enrolled with the AIMS LAB server. Contact IT - "
                     "recordings cannot be attributed or archived until it is.")
 
-            # The grant says which hospital the doctor is working at today; the
-            # device says where the machine lives. For a roaming laptop these
-            # differ legitimately, but for a fixed consulting-room PC a mismatch
-            # is worth a look, and the archive tree is hospital-first so filing
-            # under the wrong one matters.
-            if self.hospital_id and self.hospital_id != grant.hospital_id:
+            if not self.doctor_id:
+                raise SessionError(
+                    "This PC is enrolled but no doctor is assigned to it. Contact IT - "
+                    "a recording nobody can attribute is worse than one that did "
+                    "not start.")
+
+            # Identity comes from the enrolment, not the browser. An
+            # administrator bound this machine to a doctor and a hospital; the
+            # page can choose the patient and nothing else.
+            #
+            # A grant that disagrees is still recorded and still archived - the
+            # audio matters more than the argument - but it is flagged, because
+            # the only innocent explanation is a machine handed to a different
+            # doctor without being re-enrolled.
+            if grant.hospital_id and grant.hospital_id != self.hospital_id:
                 self._emit("integrity_alert", {
                     "session_id": None,
                     "alert_type": "hospital_mismatch",
                     "detail": (f"device enrolled at {self.hospital_id}, "
                                f"grant asserts {grant.hospital_id}"),
+                })
+            if grant.doctor_id and grant.doctor_id != self.doctor_id:
+                self._emit("integrity_alert", {
+                    "session_id": None,
+                    "alert_type": "doctor_mismatch",
+                    "detail": (f"device enrolled to {self.doctor_id}, "
+                               f"grant asserts {grant.doctor_id}"),
                 })
 
             if self._active is not None:
@@ -199,8 +218,10 @@ class SessionController:
             spool_session = self._spool.open_session(
                 device_key=self._device_key,
                 device_id=self.device_id,
-                doctor_id=grant.doctor_id,
-                hospital_id=grant.hospital_id,
+                # From the enrolment, so the chain records who the machine
+                # belongs to rather than who the page said.
+                doctor_id=self.doctor_id,
+                hospital_id=self.hospital_id,
                 patient_ref=grant.patient_ref,
                 consent_method=grant.consent_method,
                 audio={
@@ -262,8 +283,8 @@ class SessionController:
             logger.info("Session %s opened for patient %s by doctor %s at %s",
                         spool_session.session_id,
                         self._pseudonym(grant.patient_ref),
-                        self._pseudonym(grant.doctor_id),
-                        grant.hospital_id)
+                        self._pseudonym(self.doctor_id),
+                        self.hospital_id)
 
             result = {
                 "session_id": spool_session.session_id,
@@ -275,8 +296,8 @@ class SessionController:
             self._emit("recording_started", {
                 "session_id": spool_session.session_id,
                 "patient_ref": grant.patient_ref,
-                "doctor_id": grant.doctor_id,
-                "hospital_id": grant.hospital_id,
+                "doctor_id": self.doctor_id,
+                "hospital_id": self.hospital_id,
             })
             return result
 
@@ -326,14 +347,14 @@ class SessionController:
             entry = active.spool.append_chain_entry("pause", crypto.pause_payload(
                 reason=reason,
                 reason_detail=reason_detail,
-                authorised_by=authorised_by or active.grant.doctor_id,
+                authorised_by=authorised_by or self.doctor_id,
                 supervisor_required=supervisor_required,
                 at=now,
             ))
             active.pause = PauseRecord(
                 reason=reason,
                 reason_detail=reason_detail,
-                authorised_by=authorised_by or active.grant.doctor_id,
+                authorised_by=authorised_by or self.doctor_id,
                 supervisor_required=supervisor_required,
                 started_at=now,
                 started_monotonic=time.monotonic(),
@@ -642,8 +663,10 @@ class SessionController:
             "session_id": active.session_id if active else None,
             "patient_ref": active.grant.patient_ref if active else None,
             "patient_name": active.patient_name if active else None,
-            "doctor_id": active.grant.doctor_id if active else None,
-            "hospital_id": active.grant.hospital_id if active else None,
+            # Reported even with no session running, so the dashboard can
+            # show who this machine is enrolled to before recording starts.
+            "doctor_id": self.doctor_id or None,
+            "hospital_id": self.hospital_id or None,
             "started_at": crypto.iso_utc(active.opened_at) if active else None,
             "segment_count": len(active.spool.segments) if active else 0,
             "duration_seconds": round(self._live_duration(active), 1) if active else 0.0,
