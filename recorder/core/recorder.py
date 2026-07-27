@@ -228,6 +228,13 @@ class AudioRecorder:
                 data = stream.read(chunk_frames, exception_on_overflow=False)
                 consecutive_errors = 0
             except Exception as exc:
+                # A read in flight when stop() closes the device fails, and so
+                # does every read after it. Those are the shutdown itself, not a
+                # fault: counting them reported "20 read errors" on a clean stop
+                # and put an alarming message in front of the doctor.
+                if not self._running.is_set():
+                    break
+
                 self.stats.read_errors += 1
                 consecutive_errors += 1
                 logger.error("Audio read failed (%s in a row): %s", consecutive_errors, exc)

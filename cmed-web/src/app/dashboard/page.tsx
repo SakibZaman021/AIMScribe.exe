@@ -331,7 +331,7 @@ export default function DashboardPage() {
             {/* Who this machine is enrolled to. Set by an administrator at
                 enrolment; the page cannot change it and never sends it. */}
             <div className="text-sm text-gray-600">
-              {connected ? (status?.doctorId ?? 'not enrolled') : 'connecting…'}
+              {!status ? 'connecting…' : (status.doctorId ?? 'not enrolled')}
               {status?.hospitalId && (
                 <span className="text-gray-400"> · {status.hospitalId}</span>
               )}
@@ -398,9 +398,9 @@ export default function DashboardPage() {
               <div className="mt-6 pt-4 border-t">
                 <div className="text-sm font-medium text-gray-700">Consulting at</div>
                 <div className="text-sm text-gray-600 mt-1">
-                  {!connected
+                  {!status
                     ? 'waiting for AIMScribe on this PC…'
-                    : status?.hospitalId
+                    : status.hospitalId
                       ? `${status.hospitalId}${status.doctorId ? ` · ${status.doctorId}` : ''}`
                       : 'this PC is not enrolled — contact IT'}
                 </div>

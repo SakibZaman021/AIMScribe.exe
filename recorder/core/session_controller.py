@@ -609,12 +609,23 @@ class SessionController:
                 "alert_type": "capture_overrun",
                 "detail": f"{stats.overruns} chunk(s) dropped because the segmenter fell behind",
             })
-        if stats.read_errors:
+        # A few dropped reads happen when a headset is unplugged or Windows
+        # switches default device, and cost a fraction of a second. Reporting
+        # every one put "20 read error(s) from the input device" in front of a
+        # doctor who could do nothing with it. Only say something when enough
+        # audio is missing to matter.
+        lost_seconds = stats.read_errors * self.cfg.audio.frames_per_buffer / max(
+            1, self.cfg.audio.sample_rate)
+        if lost_seconds >= 1.0:
             self._emit("integrity_alert", {
                 "session_id": active.session_id,
                 "alert_type": "capture_read_errors",
-                "detail": f"{stats.read_errors} read error(s) from the input device",
+                "detail": (f"about {lost_seconds:.0f}s of audio was lost - check the "
+                           f"microphone is firmly connected"),
             })
+        elif stats.read_errors:
+            logger.info("%s transient read error(s), about %.2fs lost",
+                        stats.read_errors, lost_seconds)
 
     # ---- heartbeat ----
 
