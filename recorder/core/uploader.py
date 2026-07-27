@@ -371,7 +371,21 @@ class UploadManager:
         if result is None:
             return False
 
-        if result.get("status") == "quarantined":
+        status = result.get("status")
+
+        # Not a failure and not a close: the server is still missing segments,
+        # normally because close raced the final upload. Leaving close_reported
+        # unset is the whole point - the drain loop retries once every segment has
+        # landed. Marking it here stranded the session open permanently, with the
+        # audio uploaded but never archived and never purged.
+        if status == "incomplete":
+            logger.info(
+                "Close deferred for %s: backend holds %s of %s segments",
+                session.session_id, result.get("server_segments"),
+                result.get("agent_segments", len(session.segments)))
+            return False
+
+        if status == "quarantined":
             logger.critical("Backend quarantined session %s at close: %s",
                             session.session_id, result.get("reason"))
             self._emit("integrity_alert", {

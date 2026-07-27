@@ -164,8 +164,10 @@ class SpoolConfig:
 @dataclass(frozen=True)
 class BackendConfig:
     """AIMS LAB server, reached over the per-PC tunnel."""
-    base_url: str = "http://localhost:7000"
-    api_prefix: str = "/api/v1"
+    base_url: str = "http://localhost:6000"
+    # Protocol 2 routes. The v1 prefix still serves the transcription API and
+    # has none of these endpoints, so pointing an agent at it fails on enrolment.
+    api_prefix: str = "/api/v2"
     request_timeout: int = 30
     upload_timeout: int = 300
     retry_backoff: tuple = (2.0, 8.0, 30.0, 120.0, 600.0)
@@ -286,8 +288,8 @@ class Config:
 
         backoff = tuple(float(v) for v in _list("AIMS_RETRY_BACKOFF", "2,8,30,120,600"))
         backend = BackendConfig(
-            base_url=_str("AIMS_BACKEND_URL", "http://localhost:7000"),
-            api_prefix=_str("AIMS_BACKEND_API_PREFIX", "/api/v1"),
+            base_url=_str("AIMS_BACKEND_URL", "http://localhost:6000"),
+            api_prefix=_str("AIMS_BACKEND_API_PREFIX", "/api/v2"),
             request_timeout=_int("AIMS_REQUEST_TIMEOUT", 30),
             upload_timeout=_int("AIMS_UPLOAD_TIMEOUT", 300),
             retry_backoff=backoff or (2.0, 8.0, 30.0, 120.0, 600.0),

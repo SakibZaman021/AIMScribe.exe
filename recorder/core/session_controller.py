@@ -682,7 +682,21 @@ class SessionController:
         """
         task = asyncio.create_task(coro)
         self._background.add(task)
-        task.add_done_callback(self._background.discard)
+        task.add_done_callback(self._on_background_done)
+
+    def _on_background_done(self, task: "asyncio.Task") -> None:
+        """
+        Discard the task and surface anything it raised.
+
+        Discarding without reading the exception loses it silently, which is how a
+        failed close looked identical to a successful one.
+        """
+        self._background.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("Background backend call failed: %s", exc, exc_info=exc)
 
     def _require_active(self) -> ActiveSession:
         if self._active is None:

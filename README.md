@@ -1,242 +1,143 @@
-# AIMScribe System v1.0
+# AIMScribe
 
-Split architecture with System Tray Recorder + CMED Web Frontend + AIMS LAB Server.
+Clinical consultation recording for AIMS LAB. A Windows tray agent captures
+doctor–patient audio, and every recording reaches the hospital's archive with
+evidence that it arrived complete and unaltered.
 
-## Architecture Overview
+Two things live in this repository: the agent that runs on each doctor's PC
+(`recorder/`) and the CMED web application that starts and stops recordings
+(`cmed-web/`). The AI backend and the archive worker live in
+[AIMScribe_Backend_Render](https://github.com/SakibZaman021/AIMScribe_Backend_Render).
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    DOCTOR'S PC                                  │
-│  ┌─────────────────┐       ┌─────────────────────────────────┐  │
-│  │   CMED Web      │       │   AIMScribe Recorder            │  │
-│  │   (NextJS)      │──────▶│   (System Tray)                 │  │
-│  │   :3000         │       │   :5050                         │  │
-│  └────────┬────────┘       └──────────────┬──────────────────┘  │
-│           │                               │                     │
-└───────────┼───────────────────────────────┼─────────────────────┘
-            │                               │
-            │ Poll NER                      │ Upload Clips
-            │                               │
-┌───────────┼───────────────────────────────┼─────────────────────┐
-│           ▼                               ▼                     │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │              AIMScribe Backend (Docker)                 │    │
-│  │   API :6000  │  PostgreSQL  │  Redis  │  MinIO          │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                                                 │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │              AIMS LAB Server                            │    │
-│  │   :7000  │  Audio Storage: D:\AIMSLAB_AUDIO_STORAGE     │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                        AIMS LAB SERVER                          │
-└─────────────────────────────────────────────────────────────────┘
-```
+---
 
-## Components
-
-| Component | Port | Description |
-|-----------|------|-------------|
-| CMED Web | 3000 | Doctor dashboard (NextJS + Tailwind) |
-| Recorder | 5050 | System tray app, receives triggers |
-| Backend API | 6000 | FastAPI, handles transcription/NER |
-| AIMS LAB Server | 7000 | Receives and stores audio files |
-
-## Key Features
-
-### 1. Session ID = Patient ID
-- No confusing auto-generated session IDs
-- `patient_id` from CMED is used as the unique identifier
-- Easy to search and track patients
-
-### 2. Auto Start/Stop
-- Clicking "Patient History" for a new patient automatically:
-  - Stops any current recording
-  - Starts new recording for the new patient
-
-### 3. Force Reset for Crash Recovery
-- If CMED crashes, run `force-reset.bat`
-- Or call `POST http://localhost:5050/force-reset`
-- Clears stuck recording state
-
-### 4. Audio File Forwarding
-- Recordings are forwarded to AIMS LAB server
-- Doctor's PC doesn't accumulate large audio files
-- All audio stored centrally at `D:\AIMSLAB_AUDIO_STORAGE`
-
-### 5. Health Screening Data
-- Health screening data is sent with session creation
-- Stored in AIMScribe PostgreSQL database
-
-## Quick Start
-
-### Option 1: Start Everything
-```batch
-start-all.bat
-```
-
-### Option 2: Start Components Individually
-```batch
-# Terminal 1: Start Backend (Docker)
-start-backend.bat
-
-# Terminal 2: Start AIMS LAB Server
-start-aimslab-server.bat
-
-# Terminal 3: Start Recorder
-start-recorder.bat
-
-# Terminal 4: Start CMED Web
-start-cmed.bat
-```
-
-### Check System Status
-```batch
-check-status.bat
-```
-
-### Force Reset (Crash Recovery)
-```batch
-force-reset.bat
-```
-
-### Stop Everything
-```batch
-stop-all.bat
-```
-
-## User Flow
-
-1. **Reception** fills in patient info at `http://localhost:3000`
-   - Patient ID, Name, Age, Gender
-   - Health Screening (BP, pulse, diabetes, height, weight, temperature)
-
-2. **Doctor** clicks "Go to Doctor Dashboard"
-
-3. **Doctor** clicks "Patient History" tab
-   - Recording starts automatically
-   - Red indicator shows recording in progress
-
-4. **Doctor** conducts consultation (audio recorded)
-
-5. **System** automatically:
-   - Splits recording into 3-minute clips
-   - Uploads clips to Backend (MinIO)
-   - Backend transcribes and extracts NER
-   - NER appears in prescription fields
-
-6. **Doctor** clicks "Stop Recording"
-   - Recording finishes
-   - Full recording forwarded to AIMS LAB server
-   - Local copy deleted to save space
-
-7. **Doctor** reviews/edits prescription and saves
-
-## API Endpoints
-
-### Recorder (localhost:5050)
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | /health | Health check |
-| GET | /status | Current recording status |
-| POST | /trigger | Start recording (with patient context) |
-| POST | /stop | Stop current recording |
-| POST | /force-reset | Force reset state (crash recovery) |
-
-### AIMS LAB Server (localhost:7000)
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | /health | Health check |
-| POST | /receive-recording | Receive full recording file |
-| POST | /receive-clip | Receive clip file |
-| POST | /create-session | Create session in backend |
-| GET | /patients | List all patients with recordings |
-| GET | /patient/{id}/recordings | Get patient's recordings |
-
-## File Structure
+## How a consultation travels
 
 ```
-aimscribe.exe.v1/
-├── start-all.bat              # Start everything
-├── start-backend.bat          # Start Docker services
-├── start-recorder.bat         # Start recorder
-├── start-cmed.bat             # Start CMED web
-├── start-aimslab-server.bat   # Start AIMS LAB server
-├── stop-all.bat               # Stop everything
-├── force-reset.bat            # Force reset recorder
-├── check-status.bat           # Check system status
-├── README.md
-│
-├── recorder/                  # System tray recorder
-│   ├── main.py
-│   ├── config.py
-│   ├── requirements.txt
-│   ├── api/
-│   │   └── trigger_server.py
-│   └── core/
-│       ├── recorder.py
-│       ├── simple_splitter.py
-│       ├── clip_uploader.py
-│       ├── session_controller.py
-│       └── file_forwarder.py
-│
-├── cmed-web/                  # Doctor dashboard
-│   ├── package.json
-│   ├── next.config.js
-│   └── src/app/
-│       ├── page.tsx          # Patient entry
-│       └── dashboard/
-│           └── page.tsx      # Doctor dashboard
-│
-└── aimslab-server/            # Audio file receiver
-    ├── main.py
-    ├── config.py
-    └── requirements.txt
+DOCTOR'S PC                    OBJECT STORAGE            AIMS LAB SERVER
+                                  (transit)                 (archive)
+
+CMED page: Start
+     │  grant, 60s, single use, signed by CMED
+     ▼
+  agent verifies it
+     │
+  ULID minted locally  ← recording starts even with the backend down
+     │
+  microphone 44.1 kHz WAV
+     │
+  clip closes every ~180s
+     ├──► encrypted spool on disk (AES-256-GCM, DPAPI-wrapped key)
+     │
+     └──► presigned PUT ──► clip stored
+                              │
+              backend re-reads the object and re-hashes it;
+              a mismatch quarantines the session
+                              │
+  doctor: Stop                 │
+     │  signed close entry     │
+     ▼                         │
+                          archive worker pulls ──► clips joined into one WAV
+                          (outbound only, no                │
+                           inbound ports)      re-read from disk and hashed
+                                                            │
+                                               HOSPITAL/DOCTOR/DATE/
+                                               45_DR001_HOSP001_1432-1522_20260727.wav
+                                                            │
+                                               purge receipts signed (Ed25519)
+                                                            │
+     ◄──────────────────────────────────────────────────────┘
+  agent verifies each receipt, then deletes its local copy
+                              │
+                    clips deleted from object storage
 ```
 
-## Requirements
+Local audio is never deleted because an upload returned HTTP 200. It is deleted
+only against a server-signed receipt proving the archive copy exists and hashes
+correctly. If the archive is lost, no receipt is issued and nothing is deleted.
 
-- **Python 3.11+** (for Recorder and AIMS LAB Server)
-- **Node.js 18+** (for CMED Web)
-- **Docker Desktop** (for Backend)
+---
+
+## Integrity
+
+Every session carries an Ed25519 hash chain, signed by a machine-bound device
+key, covering the open, each segment, each pause and resume, and the close.
+Deleting, reordering or substituting audio breaks the chain, and a broken chain
+quarantines the session rather than archiving it.
+
+A gap in a recording is explained rather than unaccounted for: pausing requires
+a reason, long pauses require a supervisor, and both are written into the chain.
+
+---
+
+## Running it
+
+### Doctor PC
+
+Install the signed build with `recorder/install.ps1` as administrator. It
+registers a logon task, writes configuration, and enrols the device with a
+one-time token from an administrator. No batch scripts are placed on a clinical
+machine and the tray app cannot be exited by a non-administrator.
+
+For development:
+
+```powershell
+cd recorder
+pip install -r requirements.txt
+python scripts\dev_keys.py     # once: grant and receipt key pairs
+python main.py
+```
+
+### CMED web
+
+```powershell
+cd cmed-web
+npm install
+npm run dev
+```
+
+Copy `.env.local.example` to `.env.local` first and fill it in. Generate a
+doctor password with `node scripts/hash-password.mjs "the password"`.
+
+### Backend and archive
+
+See the backend repository. The archive worker runs on the AIMS LAB server and
+makes only outbound connections, so that machine needs no open ports.
+
+---
 
 ## Configuration
 
-### Environment Variables
+`recorder/.env.example` documents every setting. The ones that matter most:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| AIMSCRIBE_BACKEND_URL | http://localhost:6000 | Backend API URL |
-| AIMSLAB_SERVER_URL | http://localhost:7000 | AIMS LAB server URL |
-| TRIGGER_PORT | 5050 | Recorder trigger port |
+| Setting | Why it matters |
+|---|---|
+| `AIMS_ALLOWED_ORIGINS` | Exact origins only. The agent refuses the WebSocket handshake from anything else, which is what stops a random web page starting a recording. |
+| `AIMS_REQUIRE_GRANT` | Never disable. Recording requires a CMED-signed, single-use grant. |
+| `AIMS_PURGE_GRACE_HOURS` | How long receipted audio is kept locally as a safety net. 24 in production. |
+| `AIMS_SPOOL_MAX_BYTES` | 40 GB is about three weeks of backend downtime at 44.1 kHz. |
+| `AIMS_ALLOW_PLAINTEXT_KEYSTORE` | Development only. Must be false on a clinical PC. |
 
-### AIMS LAB Server Storage
+Audio is 44.1 kHz, mono, 16-bit WAV PCM: about 318 MB per hour. Changing those
+values changes the archive contract.
 
-Audio files are stored at:
+---
+
+## Tests
+
+```powershell
+cd recorder
+python -m pytest
 ```
-D:\AIMSLAB_AUDIO_STORAGE\
-├── recordings\
-│   └── {patient_id}\
-│       └── {patient_id}_{timestamp}.wav
-└── clips\
-    └── {patient_id}\
-        └── {patient_id}_clip{N}_{timestamp}.wav
-```
 
-## Troubleshooting
+67 tests, including a regression for each security defect listed in
+`SECURITY_HARDENING_PLAN.md`.
 
-### Recording won't start
-1. Check if recorder is running: `check-status.bat`
-2. Try force reset: `force-reset.bat`
-3. Check logs: `recorder\logs\`
+---
 
-### CMED crashed, can't stop recording
-1. Run `force-reset.bat`
-2. This clears the stuck state
-3. Now you can start a new recording
+## Documents
 
-### Audio not forwarded to AIMS LAB
-1. Check AIMS LAB server is running
-2. Check network connectivity
-3. Local copy is kept if forward fails
+- `TARGET_ARCHITECTURE.md` — the design, the data model, and capacity planning
+- `SECURITY_HARDENING_PLAN.md` — the v1 defects this system was built to fix
+- `INTEGRATION_SPECIFICATION.md` — the CMED integration contract
+- `ARCHITECTURE_DESIGN.md` — earlier design notes, kept for history

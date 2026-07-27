@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -212,6 +213,53 @@ def test_session_not_complete_until_close_is_reported(spool, device_key, audio_p
 
     session.mark_close_reported()
     assert session.is_complete
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response,expect_reported", [
+    ({"status": "closed", "chain_ok": True}, True),
+    # A human reviews it, but the server has accounted for the session.
+    ({"status": "quarantined", "reason": "chain broken"}, True),
+    # Segments still in flight. Must NOT be marked, or the session is stranded.
+    ({"status": "incomplete", "server_segments": 11, "agent_segments": 12}, False),
+])
+async def test_close_only_marked_when_the_server_really_closed_it(
+    spool, device_key, audio_params, response, expect_reported
+):
+    """
+    Guards a bug that stranded a real 33-minute consultation.
+
+    Stopping posts /session/close immediately, which can overtake the final
+    segment's upload. The backend then answers 'incomplete' - an HTTP 200. The
+    agent treated any 200 as delivered, journaled close_reported and never
+    retried, so the session stayed open forever: uploaded, never archived, and
+    the local audio never released.
+    """
+    from core.uploader import UploadManager
+
+    session = _open(spool, device_key, audio_params)
+    _seal(session)
+    session.mark_acknowledged()
+    session.close(duration_seconds=1.0, paused_seconds=0.0)
+
+    # cfg is only consulted inside _post, which is stubbed below.
+    manager = UploadManager(SimpleNamespace(), device_key=device_key,
+                            spool=spool, receipt_public_key=None)
+
+    async def fake_post(endpoint, payload, **kwargs):
+        assert endpoint == "/session/close"
+        return response
+
+    manager._post = fake_post
+
+    delivered = await manager.close_remote(
+        session, duration_seconds=1.0, paused_seconds=0.0)
+
+    assert session.close_reported is expect_reported
+    assert delivered is expect_reported
+
+    # Whatever the answer, the audio stays until a receipt authorises deletion.
+    assert not session.is_complete
 
 
 def test_close_reported_survives_restart(spool, device_key, audio_params):

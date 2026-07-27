@@ -12,7 +12,7 @@ The flow is designed so a doctor never sees it:
         writes  %PROGRAMDATA%\\AIMScribe\\state\\enrollment.token
 
     first agent start
-        POST /api/v1/device/enroll  { token, device_pubkey, machine info }
+        POST /api/v2/device/enroll  { token, device_pubkey, machine info }
         <- { device_id, hospital_id }
         writes  device.json, deletes enrollment.token
 
