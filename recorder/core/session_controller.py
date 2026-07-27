@@ -1,472 +1,707 @@
 """
-Session Controller
-Handles auto start/stop logic when triggers come from CMED.
-If already recording, stops current session and starts new one.
+Session controller - the agent's state machine.
 
-Key changes:
-- Uses patient_id as session_id for simplicity
-- Forwards recordings to AIMS LAB server to save space on doctor's PC
-- Includes force reset for crash recovery
+Owns one consultation at a time and coordinates capture, segmenting, the spool,
+and the upload manager. Everything that changes a recording's state passes
+through here so it can be written to the chain and the audit trail.
+
+States:
+
+    IDLE ──open──> RECORDING ──pause──> PAUSED ──resume──> RECORDING
+                       │                   │
+                       └──── stop ─────────┴──> CLOSING ──> IDLE
+
+Rules enforced here rather than trusted from the caller:
+
+* Identity comes from a verified CMED grant, never from the browser payload.
+* A session cannot open without recorded patient consent.
+* Pause requires a reason from a fixed list, and a supervisor's name once the
+  expected duration passes the configured threshold.
+* Stopping never deletes audio. Local files go only when a signed purge receipt
+  proves the archive copy exists, which the upload manager handles.
 """
+from __future__ import annotations
+
 import asyncio
 import logging
-from datetime import datetime
-from pathlib import Path
-from typing import Optional, Dict, Any
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Optional
 
-from core.recorder import AudioRecorder, get_recorder
-from core.simple_splitter import SimpleSplitter, ClipInfo
-from core.clip_uploader import AsyncClipUploader, UploadResult
-from core.file_forwarder import FileForwarder
+from core import crypto
+from core.crypto import DeviceKey, Grant
+from core.recorder import AudioCaptureError, AudioRecorder
+from core.simple_splitter import SealedSegment, Segmenter
+from core.spool import SessionSpool, Spool
+from core.uploader import UploadManager
 
 logger = logging.getLogger(__name__)
 
+IDLE = "idle"
+RECORDING = "recording"
+PAUSED = "paused"
+CLOSING = "closing"
+
+
+class SessionError(RuntimeError):
+    """A session request that must be refused, with a reason safe to show a user."""
+
 
 @dataclass
-class SessionContext:
-    """Context for a recording session"""
-    patient_id: str
+class PauseRecord:
+    reason: str
+    reason_detail: str
+    authorised_by: str
+    supervisor_required: bool
+    started_at: datetime
+    started_monotonic: float
+
+
+@dataclass
+class ActiveSession:
+    spool: SessionSpool
+    grant: Grant
     patient_name: str
-    age: str
-    gender: str
-    doctor_id: str
-    hospital_id: str
-    health_screening: Dict[str, Any]
-    # Webhook URLs for CMED integration
-    ner_webhook_url: str = ""
-    status_webhook_url: str = ""
+    recorder: AudioRecorder
+    segmenter: Segmenter
+    opened_at: datetime
+    audio_seconds: float = 0.0
+    paused_seconds: float = 0.0
+    pause: Optional[PauseRecord] = None
+    pauses: List[Dict[str, Any]] = field(default_factory=list)
+    consecutive_silent: int = 0
+    silence_alerted: bool = False
 
-
-@dataclass
-class SessionState:
-    """Current session state"""
-    is_recording: bool = False
-    session_id: Optional[str] = None  # Now same as patient_id
-    patient_id: Optional[str] = None
-    patient_name: Optional[str] = None
-    start_time: Optional[datetime] = None
-    context: Optional[SessionContext] = None
+    @property
+    def session_id(self) -> str:
+        return self.spool.session_id
 
 
 class SessionController:
-    """
-    Controls recording sessions.
-
-    Handles the logic:
-    - If trigger received and NOT recording: Start new session
-    - If trigger received and IS recording: Stop current, start new
-    - session_id = patient_id (1 patient = 1 unique ID from CMED)
-    - Forwards recordings to AIMS LAB server after completion
-    """
-
     def __init__(
         self,
-        backend_url: str = "http://localhost:6000",
-        aimslab_server_url: str = "http://localhost:7000"
+        cfg,
+        *,
+        device_key: DeviceKey,
+        spool: Spool,
+        uploader: UploadManager,
+        on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        log_salt: bytes = b"aimscribe",
     ):
-        self.backend_url = backend_url
-        self.aimslab_server_url = aimslab_server_url
+        self.cfg = cfg
+        self._device_key = device_key
+        self._spool = spool
+        self._uploader = uploader
+        self._on_event = on_event
+        self._log_salt = log_salt
 
-        # Current state
-        self._state = SessionState()
+        self.state = IDLE
+        self._active: Optional[ActiveSession] = None
         self._lock = asyncio.Lock()
-
-        # Components
-        self._recorder: Optional[AudioRecorder] = None
-        self._splitter: Optional[SimpleSplitter] = None
-        self._uploader: Optional[AsyncClipUploader] = None
-        self._forwarder: Optional[FileForwarder] = None
-
-        # WebSocket manager for broadcasting events to CMED browser
-        self._ws_manager = None
-
-        # Paths
-        self.temp_clips_dir = Path("temp_clips")
-        self.recordings_dir = Path("recordings")
-
-        # Create directories
-        self.temp_clips_dir.mkdir(parents=True, exist_ok=True)
-        self.recordings_dir.mkdir(parents=True, exist_ok=True)
-
-        # Initialize file forwarder
-        self._forwarder = FileForwarder(aimslab_server_url=aimslab_server_url)
-
-        logger.info(f"SessionController initialized")
-        logger.info(f"  Backend URL: {backend_url}")
-        logger.info(f"  AIMS LAB Server: {aimslab_server_url}")
-
-    def set_ws_manager(self, ws_manager):
-        """
-        Set the WebSocket manager for broadcasting events to CMED browser.
-
-        This enables real-time updates:
-        - clip_uploaded: When a chunk is uploaded
-        - ner_ready: When NER results are available
-        - recording_stopped: When recording stops
-        """
-        self._ws_manager = ws_manager
-        logger.info("WebSocket manager linked to SessionController")
-
-    async def handle_trigger(self, context: SessionContext) -> Dict[str, Any]:
-        """
-        Handle trigger from CMED.
-
-        If already recording: stop current session first.
-        Then start new session with given context.
-
-        session_id = patient_id (from CMED)
-
-        Returns:
-            {
-                "session_id": str (same as patient_id),
-                "status": "recording_started",
-                "previous_session_stopped": bool
-            }
-        """
-        async with self._lock:
-            previous_stopped = False
-
-            # If already recording, stop current session
-            if self._state.is_recording:
-                logger.info(f"Stopping current session for patient {self._state.patient_id}")
-                await self._stop_current_session()
-                previous_stopped = True
-
-            # Start new session
-            # session_id = patient_id
-            session_id = await self._start_new_session(context)
-
-            return {
-                "session_id": session_id,  # Same as patient_id
-                "status": "recording_started",
-                "previous_session_stopped": previous_stopped,
-                "patient_id": context.patient_id
-            }
-
-    async def handle_stop(self) -> Dict[str, Any]:
-        """
-        Handle explicit stop request.
-
-        Returns:
-            {
-                "status": "stopped",
-                "session_id": str,
-                "recording_file": str,
-                "forwarded_to_aimslab": bool
-            }
-        """
-        async with self._lock:
-            if not self._state.is_recording:
-                return {
-                    "status": "not_recording",
-                    "session_id": None
-                }
-
-            session_id = self._state.session_id
-            filepath, forwarded = await self._stop_current_session()
-
-            return {
-                "status": "stopped",
-                "session_id": session_id,
-                "recording_file": filepath,
-                "forwarded_to_aimslab": forwarded
-            }
-
-    async def force_reset(self) -> Dict[str, Any]:
-        """
-        Force reset the controller state.
-
-        Use this for crash recovery when CMED crashes and recorder
-        is stuck in recording state.
-
-        This forcefully stops all components and clears state.
-        """
-        logger.warning("FORCE RESET requested")
-
-        try:
-            # Force stop recorder if running
-            if self._recorder:
-                try:
-                    self._recorder.stop_recording(str(self.recordings_dir))
-                except:
-                    pass
-
-            # Force stop splitter
-            if self._splitter:
-                try:
-                    self._splitter.stop()
-                except:
-                    pass
-
-            # Force stop uploader
-            if self._uploader:
-                try:
-                    await self._uploader.stop()
-                except:
-                    pass
-
-        except Exception as e:
-            logger.error(f"Error during force reset: {e}")
-
-        # Clear state regardless of errors
-        old_patient_id = self._state.patient_id
-        self._state = SessionState()
-        self._recorder = None
-        self._splitter = None
-        self._uploader = None
-
-        # Reset recorder singleton
-        AudioRecorder.reset_instance()
-
-        logger.info("Force reset completed")
-
-        return {
-            "status": "reset_complete",
-            "previous_patient_id": old_patient_id,
-            "message": "Recorder state has been forcefully reset"
-        }
-
-    async def _start_new_session(self, context: SessionContext) -> Optional[str]:
-        """
-        Start a new recording session.
-
-        session_id format: PatientID_DoctorID_HospitalID_YYYYMMDD
-        """
-        try:
-            # Generate session_id matching the uploader format
-            from datetime import datetime
-            date_str = datetime.now().strftime("%Y%m%d")
-            session_id = f"{context.patient_id}_{context.doctor_id}_{context.hospital_id}_{date_str}"
-
-            # Reset recorder singleton
-            AudioRecorder.reset_instance()
-
-            # Initialize recorder
-            self._recorder = get_recorder()
-            self._recorder.set_session_info(
-                patient_id=context.patient_id,
-                doctor_id=context.doctor_id,
-                hospital_id=context.hospital_id
-            )
-
-            # Initialize splitter
-            self._splitter = SimpleSplitter(
-                patient_id=context.patient_id,
-                doctor_id=context.doctor_id,
-                hospital_id=context.hospital_id,
-                on_clip_ready=self._on_clip_ready,
-                temp_dir=str(self.temp_clips_dir)
-            )
-
-            # Initialize uploader (uses patient_id as session identifier)
-            self._uploader = AsyncClipUploader(
-                backend_url=self.backend_url,
-                patient_id=context.patient_id,
-                doctor_id=context.doctor_id,
-                hospital_id=context.hospital_id,
-                patient_name=context.patient_name,
-                patient_age=context.age,
-                patient_gender=context.gender,
-                health_screening=context.health_screening,
-                ner_webhook_url=context.ner_webhook_url,
-                status_webhook_url=context.status_webhook_url
-            )
-
-            logger.info(f"NER Webhook URL: {context.ner_webhook_url}")
-            self._uploader.set_callbacks(
-                on_upload_complete=self._on_upload_complete,
-                on_session_created=self._on_session_created
-            )
-
-            # Connect recorder to splitter
-            self._recorder.add_chunk_callback(self._splitter.process_chunk)
-
-            # Start components
-            start_time = datetime.now()
-            self._splitter.start(start_time)
-            await self._uploader.start()
-            self._recorder.start_recording()
-
-            # Update state
-            self._state.is_recording = True
-            self._state.session_id = session_id  # Format: PatientID_DoctorID_HospitalID_YYYYMMDD
-            self._state.patient_id = context.patient_id
-            self._state.patient_name = context.patient_name
-            self._state.start_time = start_time
-            self._state.context = context
-
-            logger.info(f"Session started for patient {context.patient_id}")
-            logger.info(f"Session ID: {session_id}")
-
-            return session_id
-
-        except Exception as e:
-            logger.error(f"Failed to start session: {e}")
-            await self._cleanup()
-            return None
-
-    async def _stop_current_session(self) -> tuple:
-        """
-        Stop the current recording session.
-
-        Returns:
-            (recording_filepath, forwarded_to_aimslab)
-        """
-        filepath = None
-        forwarded = False
-
-        try:
-            # Stop recorder
-            if self._recorder:
-                if self._splitter:
-                    self._recorder.remove_chunk_callback(self._splitter.process_chunk)
-                filepath = self._recorder.stop_recording(str(self.recordings_dir))
-
-            # Stop splitter (saves final clip)
-            if self._splitter:
-                self._splitter.stop()
-
-            # Wait for uploads to complete
-            if self._uploader:
-                max_wait = 120
-                waited = 0
-                while self._uploader.is_busy() and waited < max_wait:
-                    logger.info(f"Waiting for uploads... Queue: {self._uploader.get_queue_size()}")
-                    await asyncio.sleep(2)
-                    waited += 2
-
-                if waited >= max_wait:
-                    logger.warning("Upload wait timeout")
-                else:
-                    logger.info("All uploads completed")
-
-                await self._uploader.stop()
-
-            # Forward recording to AIMS LAB server
-            if filepath and self._forwarder and self._state.context:
-                logger.info(f"Forwarding recording to AIMS LAB server...")
-
-                # Check if server is available
-                if await self._forwarder.check_server_health():
-                    result = await self._forwarder.forward_recording(
-                        file_path=Path(filepath),
-                        patient_id=self._state.patient_id,
-                        patient_name=self._state.patient_name or "",
-                        recording_date=self._state.start_time.strftime("%Y-%m-%d") if self._state.start_time else "",
-                        delete_after_success=True  # Free up space on doctor's PC
-                    )
-                    forwarded = result.success
-
-                    if forwarded:
-                        logger.info(f"Recording forwarded to AIMS LAB: {result.remote_path}")
-                    else:
-                        logger.warning(f"Failed to forward recording: {result.message}")
-                else:
-                    logger.warning("AIMS LAB server not available, keeping local copy")
-
-            logger.info(f"Session stopped. Recording: {filepath}, Forwarded: {forwarded}")
-
-        except Exception as e:
-            logger.error(f"Error stopping session: {e}")
-
-        finally:
-            await self._cleanup()
-
-        return filepath, forwarded
-
-    async def _cleanup(self):
-        """Clean up session resources"""
-        self._state = SessionState()
-        self._recorder = None
-        self._splitter = None
-        self._uploader = None
-
-    def _on_clip_ready(self, clip_info: ClipInfo):
-        """Handle clip ready from splitter"""
-        logger.info(f"Clip {clip_info.clip_number} ready")
-        if self._uploader:
-            self._uploader.queue_clip_sync(clip_info)
-
-    def _on_upload_complete(self, result: UploadResult):
-        """Handle upload complete - broadcasts to CMED via WebSocket"""
-        if result.success:
-            logger.info(f"Clip {result.clip_number} uploaded successfully")
-
-            # Broadcast clip_uploaded event to CMED browser
-            if self._ws_manager:
-                asyncio.create_task(self._broadcast_clip_uploaded(result))
-        else:
-            logger.warning(f"Clip {result.clip_number} upload failed: {result.error}")
-
-            # Broadcast error to CMED browser
-            if self._ws_manager:
-                asyncio.create_task(self._broadcast_upload_error(result))
-
-    async def _broadcast_clip_uploaded(self, result: UploadResult):
-        """Broadcast clip_uploaded event via WebSocket"""
-        try:
-            await self._ws_manager.send_event("clip_uploaded", {
-                "session_id": self._state.session_id,
-                "patient_id": self._state.patient_id,
-                "clip_number": result.clip_number,
-                "duration_seconds": result.duration_seconds if hasattr(result, 'duration_seconds') else 0,
-                "message": "Clip uploaded successfully"
-            })
-        except Exception as e:
-            logger.warning(f"Failed to broadcast clip_uploaded: {e}")
-
-    async def _broadcast_upload_error(self, result: UploadResult):
-        """Broadcast upload error via WebSocket"""
-        try:
-            await self._ws_manager.send_event("upload_error", {
-                "session_id": self._state.session_id,
-                "clip_number": result.clip_number,
-                "error": result.error
-            })
-        except Exception as e:
-            logger.warning(f"Failed to broadcast upload_error: {e}")
-
-    def _on_session_created(self, session_id: str):
-        """Handle session creation callback from backend"""
-        # Note: We use patient_id as session_id, but backend may have its own
-        logger.info(f"Backend session created: {session_id}")
-
-    def get_status(self) -> Dict[str, Any]:
-        """Get current status"""
-        context = self._state.context
-        return {
-            "is_recording": self._state.is_recording,
-            "session_id": self._state.session_id,  # Same as patient_id
-            "patient_id": self._state.patient_id,
-            "patient_name": self._state.patient_name,
-            "doctor_id": context.doctor_id if context else None,
-            "hospital_id": context.hospital_id if context else None,
-            "start_time": self._state.start_time.isoformat() if self._state.start_time else None,
-            "duration_seconds": self._recorder.get_duration() if self._recorder else 0
-        }
-
-    async def broadcast_ner_ready(self, ner_data: Dict[str, Any]):
-        """
-        Broadcast NER results to CMED browser via WebSocket.
-
-        Called when backend sends NER results via webhook.
-        This relays the NER data to the connected CMED browser.
-        """
-        if self._ws_manager:
+        # Strong references to fire-and-forget tasks. Without this the event loop
+        # may garbage-collect a running task mid-flight.
+        self._background: set = set()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._heartbeat_task: Optional[asyncio.Task] = None
+        # Both set from the server-issued device identity at startup. Empty means
+        # this machine is not enrolled and must not record.
+        self.device_id: str = ""
+        self.hospital_id: str = ""
+        self.last_alert: str = ""
+
+    # ---- startup / shutdown ----
+
+    async def start(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        await self._recover_previous_sessions()
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(), name="Heartbeat")
+
+    async def close(self) -> None:
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
             try:
-                await self._ws_manager.send_event("ner_ready", {
-                    "session_id": self._state.session_id,
-                    "patient_id": self._state.patient_id,
-                    "version": ner_data.get("version", 1),
-                    "ner": ner_data.get("ner", {}),
-                    "transcript_preview": ner_data.get("transcript_preview", "")
-                })
-                logger.info(f"NER results broadcasted to CMED browser")
-            except Exception as e:
-                logger.warning(f"Failed to broadcast NER: {e}")
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+        if self._active:
+            await self.stop_session(reason="agent_shutdown")
 
-    async def close(self):
-        """Clean up resources"""
-        if self._forwarder:
-            await self._forwarder.close()
+    async def _recover_previous_sessions(self) -> None:
+        """
+        Adopt anything left in the spool by a previous run.
+
+        A session that was still open when the process died is closed short and the
+        interruption is recorded, so the gap is explained rather than mysterious.
+        """
+        for session in self._spool.recover(self._device_key):
+            if session.closed_at is None:
+                logger.warning("Session %s was interrupted; closing it short",
+                               session.session_id)
+                session.append_chain_entry("pause", crypto.pause_payload(
+                    reason="non_clinical_interruption",
+                    reason_detail="agent stopped unexpectedly; recovered at startup",
+                    authorised_by="system",
+                    supervisor_required=False,
+                    at=datetime.now(timezone.utc),
+                ))
+                total = sum(s.duration_seconds for s in session.segments.values())
+                session.close(duration_seconds=total, paused_seconds=0.0)
+                self._emit("integrity_alert", {
+                    "session_id": session.session_id,
+                    "alert_type": "unexpected_agent_exit",
+                    "detail": "session recovered from the spool after an unclean shutdown",
+                })
+            await self._uploader.track(session)
+
+    # ---- opening ----
+
+    async def open_session(
+        self,
+        grant: Grant,
+        *,
+        patient_name: str = "",
+        session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        async with self._lock:
+            previous_id: Optional[str] = None
+
+            if not self.device_id:
+                raise SessionError(
+                    "This PC is not enrolled with the AIMS LAB server. Contact IT - "
+                    "recordings cannot be attributed or archived until it is.")
+
+            # The grant says which hospital the doctor is working at today; the
+            # device says where the machine lives. For a roaming laptop these
+            # differ legitimately, but for a fixed consulting-room PC a mismatch
+            # is worth a look, and the archive tree is hospital-first so filing
+            # under the wrong one matters.
+            if self.hospital_id and self.hospital_id != grant.hospital_id:
+                self._emit("integrity_alert", {
+                    "session_id": None,
+                    "alert_type": "hospital_mismatch",
+                    "detail": (f"device enrolled at {self.hospital_id}, "
+                               f"grant asserts {grant.hospital_id}"),
+                })
+
+            if self._active is not None:
+                # A doctor opening a different patient means the previous
+                # consultation is over. Close it properly rather than abandoning it.
+                previous_id = self._active.session_id
+                logger.info("Closing session %s before opening a new one", previous_id)
+                await self._close_active(reason="superseded_by_new_patient")
+
+            if not self._spool.has_capacity(self.cfg.audio.bytes_per_second * 240):
+                raise SessionError(
+                    "Local audio buffer is full. Recording cannot start until the "
+                    "backlog uploads. Contact support.")
+
+            spool_session = self._spool.open_session(
+                device_key=self._device_key,
+                device_id=self.device_id,
+                doctor_id=grant.doctor_id,
+                hospital_id=grant.hospital_id,
+                patient_ref=grant.patient_ref,
+                consent_method=grant.consent_method,
+                audio={
+                    "sample_rate": self.cfg.audio.sample_rate,
+                    "channels": self.cfg.audio.channels,
+                    "sample_width": self.cfg.audio.sample_width,
+                },
+                session_id=session_id,
+            )
+
+            segmenter = Segmenter(
+                sample_rate=self.cfg.audio.sample_rate,
+                channels=self.cfg.audio.channels,
+                sample_width=self.cfg.audio.sample_width,
+                min_seconds=self.cfg.segment.min_seconds,
+                max_seconds=self.cfg.segment.max_seconds,
+                silence_rms=self.cfg.segment.silence_rms,
+                silence_hold_seconds=self.cfg.segment.silence_hold_seconds,
+                on_segment=self._on_segment_sealed,
+            )
+            recorder = AudioRecorder(
+                sample_rate=self.cfg.audio.sample_rate,
+                channels=self.cfg.audio.channels,
+                sample_width=self.cfg.audio.sample_width,
+                frames_per_buffer=self.cfg.audio.frames_per_buffer,
+                input_device_index=self.cfg.audio.input_device_index,
+                on_chunk=segmenter.submit,
+                on_error=self._on_capture_error,
+            )
+
+            opened_at = datetime.now(timezone.utc)
+            segmenter.start(opened_at)
+            try:
+                recorder.start()
+            except AudioCaptureError as exc:
+                segmenter.stop(seal_remaining=False)
+                self._emit("integrity_alert", {
+                    "session_id": spool_session.session_id,
+                    "alert_type": "microphone_unavailable",
+                    "detail": str(exc),
+                })
+                raise SessionError(
+                    "The microphone is unavailable. Check that it is connected and "
+                    "not in use by another application.") from exc
+
+            self._active = ActiveSession(
+                spool=spool_session,
+                grant=grant,
+                patient_name=patient_name,
+                recorder=recorder,
+                segmenter=segmenter,
+                opened_at=opened_at,
+            )
+            self.state = RECORDING
+
+            await self._uploader.track(spool_session)
+            self._uploader.nudge()
+
+            logger.info("Session %s opened for patient %s by doctor %s at %s",
+                        spool_session.session_id,
+                        self._pseudonym(grant.patient_ref),
+                        self._pseudonym(grant.doctor_id),
+                        grant.hospital_id)
+
+            result = {
+                "session_id": spool_session.session_id,
+                "status": "recording",
+                "started_at": crypto.iso_utc(opened_at),
+                "previous_session_stopped": previous_id is not None,
+                "previous_session_id": previous_id,
+            }
+            self._emit("recording_started", {
+                "session_id": spool_session.session_id,
+                "patient_ref": grant.patient_ref,
+                "doctor_id": grant.doctor_id,
+                "hospital_id": grant.hospital_id,
+            })
+            return result
+
+    # ---- pause / resume ----
+
+    async def pause_session(
+        self,
+        *,
+        reason: str,
+        reason_detail: str = "",
+        authorised_by: str = "",
+        expected_seconds: int = 0,
+    ) -> Dict[str, Any]:
+        """
+        Supervised pause. The gap becomes an explained chain entry.
+
+        Capture is stopped outright rather than muted, so the operating system's
+        microphone indicator also goes out - the patient can see it has stopped.
+        """
+        async with self._lock:
+            active = self._require_active()
+            if self.state == PAUSED:
+                raise SessionError("Recording is already paused.")
+
+            if reason not in self.cfg.pause.reasons:
+                raise SessionError(
+                    f"Unknown pause reason. Choose one of: {', '.join(self.cfg.pause.reasons)}")
+            if reason == "other" and not reason_detail.strip():
+                raise SessionError("A written reason is required when choosing 'other'.")
+
+            threshold = self.cfg.pause.self_authorise_seconds
+            supervisor_required = expected_seconds > threshold
+            if supervisor_required and not authorised_by.strip():
+                raise SessionError(
+                    f"A pause longer than {threshold // 60} minutes needs a "
+                    "supervisor's name.")
+
+            # Order matters: stop capture first so no further chunks can be queued,
+            # then flush. Flushing first would let audio recorded after the pause
+            # decision land in the next segment, blurring the boundary the chain
+            # entry claims is exact.
+            stats = active.recorder.stop()
+            active.audio_seconds += stats.bytes_captured / max(1, active.recorder.bytes_per_second)
+            active.segmenter.flush(is_final=False)
+
+            now = datetime.now(timezone.utc)
+            entry = active.spool.append_chain_entry("pause", crypto.pause_payload(
+                reason=reason,
+                reason_detail=reason_detail,
+                authorised_by=authorised_by or active.grant.doctor_id,
+                supervisor_required=supervisor_required,
+                at=now,
+            ))
+            active.pause = PauseRecord(
+                reason=reason,
+                reason_detail=reason_detail,
+                authorised_by=authorised_by or active.grant.doctor_id,
+                supervisor_required=supervisor_required,
+                started_at=now,
+                started_monotonic=time.monotonic(),
+            )
+            self.state = PAUSED
+
+            self._spawn(self._uploader.notify_pause(active.spool, entry))
+            self._uploader.nudge()
+
+            logger.warning("Session %s PAUSED: reason=%s authorised_by=%s",
+                           active.session_id, reason,
+                           self._pseudonym(active.pause.authorised_by))
+            self._emit("recording_paused", {
+                "session_id": active.session_id,
+                "reason": reason,
+                "reason_detail": reason_detail,
+                "authorised_by": active.pause.authorised_by,
+                "paused_at": crypto.iso_utc(now),
+            })
+            return {
+                "session_id": active.session_id,
+                "status": "paused",
+                "reason": reason,
+                "paused_at": crypto.iso_utc(now),
+            }
+
+    async def resume_session(self) -> Dict[str, Any]:
+        async with self._lock:
+            active = self._require_active()
+            if self.state != PAUSED or active.pause is None:
+                raise SessionError("Recording is not paused.")
+
+            paused_for = time.monotonic() - active.pause.started_monotonic
+            active.paused_seconds += paused_for
+            now = datetime.now(timezone.utc)
+
+            entry = active.spool.append_chain_entry("resume", crypto.resume_payload(
+                at=now, paused_seconds=paused_for))
+
+            active.pauses.append({
+                "reason": active.pause.reason,
+                "authorised_by": active.pause.authorised_by,
+                "from": crypto.iso_utc(active.pause.started_at),
+                "to": crypto.iso_utc(now),
+                "seconds": round(paused_for, 1),
+            })
+            active.pause = None
+
+            # Segmenter keeps running across a pause; only capture restarts. Its
+            # segment clock is moved to now, otherwise the next segment's
+            # timestamps would continue from before the pause and imply audio that
+            # was never recorded.
+            active.segmenter.set_segment_start(now)
+            try:
+                active.recorder.start()
+            except AudioCaptureError as exc:
+                self.state = PAUSED
+                raise SessionError(
+                    "The microphone could not be reopened. Check the device and try again."
+                ) from exc
+
+            self.state = RECORDING
+            self._spawn(self._uploader.notify_resume(active.spool, entry))
+
+            logger.info("Session %s resumed after %.1f s", active.session_id, paused_for)
+            self._emit("recording_resumed", {
+                "session_id": active.session_id,
+                "paused_seconds": round(paused_for, 1),
+                "resumed_at": crypto.iso_utc(now),
+            })
+            return {
+                "session_id": active.session_id,
+                "status": "recording",
+                "paused_seconds": round(paused_for, 1),
+            }
+
+    # ---- stopping ----
+
+    async def stop_session(self, *, reason: str = "doctor_stopped") -> Dict[str, Any]:
+        async with self._lock:
+            if self._active is None:
+                return {"status": "not_recording", "session_id": None}
+            return await self._close_active(reason=reason)
+
+    async def _close_active(self, *, reason: str) -> Dict[str, Any]:
+        active = self._active
+        assert active is not None
+        self.state = CLOSING
+
+        # If we are closing from a paused state, account for the open pause.
+        if active.pause is not None:
+            active.paused_seconds += time.monotonic() - active.pause.started_monotonic
+            active.pauses.append({
+                "reason": active.pause.reason,
+                "authorised_by": active.pause.authorised_by,
+                "from": crypto.iso_utc(active.pause.started_at),
+                "to": crypto.iso_utc(datetime.now(timezone.utc)),
+                "seconds": round(time.monotonic() - active.pause.started_monotonic, 1),
+                "resumed": False,
+            })
+            active.pause = None
+
+        if active.recorder.is_running:
+            stats = active.recorder.stop()
+            active.audio_seconds += stats.bytes_captured / max(1, active.recorder.bytes_per_second)
+            self._check_capture_health(active, stats)
+
+        # Seals the tail as the final segment.
+        active.segmenter.stop(seal_remaining=True)
+
+        close_entry = active.spool.close(
+            duration_seconds=active.audio_seconds,
+            paused_seconds=active.paused_seconds,
+        )
+        verdict = active.spool.verify_chain()
+        if not verdict.ok:
+            logger.critical("Local chain verification failed for %s: %s",
+                            active.session_id, verdict.reason)
+            self._emit("integrity_alert", {
+                "session_id": active.session_id,
+                "alert_type": "local_chain_invalid",
+                "detail": verdict.reason,
+            })
+
+        # Also fire-and-forget: the drain loop retries close for any session that
+        # was closed while the backend was unreachable, so stopping a recording
+        # stays instant regardless of the network.
+        self._spawn(self._uploader.close_remote(
+            active.spool,
+            duration_seconds=active.audio_seconds,
+            paused_seconds=active.paused_seconds,
+        ))
+        self._uploader.nudge()
+
+        result = {
+            "status": "stopped",
+            "session_id": active.session_id,
+            "duration_seconds": round(active.audio_seconds, 1),
+            "paused_seconds": round(active.paused_seconds, 1),
+            "segment_count": len(active.spool.segments),
+            "pauses": active.pauses,
+            "reason": reason,
+            "chain_ok": verdict.ok,
+        }
+
+        logger.info("Session %s stopped: %.1f s audio, %s segments, %s pause(s), reason=%s",
+                    active.session_id, active.audio_seconds,
+                    len(active.spool.segments), len(active.pauses), reason)
+
+        self._active = None
+        self.state = IDLE
+        self._emit("recording_stopped", result)
+        return result
+
+    async def force_reset(self, *, actor: str = "unknown", reason: str = "") -> Dict[str, Any]:
+        """
+        Clear a stuck state without discarding audio.
+
+        v1's force reset dropped the session and its recording. Here everything
+        already sealed stays in the spool and continues uploading; only the live
+        state machine is reset, and the event is recorded.
+        """
+        async with self._lock:
+            previous = self._active.session_id if self._active else None
+            logger.warning("Force reset requested by %s (reason=%s), session=%s",
+                           actor, reason or "-", previous or "-")
+
+            if self._active is not None:
+                try:
+                    await self._close_active(reason=f"force_reset:{actor}")
+                except Exception as exc:
+                    logger.error("Force reset could not close cleanly: %s", exc)
+                    self._active = None
+                    self.state = IDLE
+
+            self._emit("integrity_alert", {
+                "session_id": previous,
+                "alert_type": "force_reset",
+                "detail": f"actor={actor} reason={reason}",
+            })
+            return {
+                "status": "reset_complete",
+                "previous_session_id": previous,
+                "audio_preserved": True,
+            }
+
+    # ---- callbacks ----
+
+    def _on_segment_sealed(self, sealed: SealedSegment) -> None:
+        """
+        Runs on the segmenter thread. Writes to the spool, then wakes the uploader.
+
+        Disk I/O here is deliberate: this thread exists so the capture thread does
+        not have to do it.
+        """
+        active = self._active
+        if active is None:
+            logger.error("Sealed segment arrived with no active session; discarding is not an "
+                         "option, writing to the last known spool is not safe - dropping")
+            return
+
+        segment = active.spool.seal_segment(
+            sealed.pcm,
+            captured_start_at=sealed.captured_start_at,
+            captured_end_at=sealed.captured_end_at,
+            rms_mean=sealed.rms_mean,
+            is_final=sealed.is_final,
+        )
+
+        # A run of segments at the noise floor usually means a muted, unplugged or
+        # physically covered microphone. Raised once per session, and only after
+        # two consecutive silent segments: a single quiet clip is unremarkable, and
+        # an alert per segment is noise nobody reads.
+        if sealed.rms_mean < (self.cfg.segment.silence_rms / 4):
+            active.consecutive_silent += 1
+            if active.consecutive_silent >= 2 and not active.silence_alerted:
+                active.silence_alerted = True
+                self._emit("integrity_alert", {
+                    "session_id": active.session_id,
+                    "seq_no": segment.seq_no,
+                    "alert_type": "silent_session",
+                    "detail": (f"{active.consecutive_silent} consecutive segments at the "
+                               f"noise floor (mean RMS {sealed.rms_mean:.1f}) - check that "
+                               f"the microphone is connected and not muted"),
+                })
+        else:
+            active.consecutive_silent = 0
+
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._uploader.nudge)
+
+        self._emit("segment_sealed", {
+            "session_id": active.session_id,
+            "seq_no": segment.seq_no,
+            "duration_seconds": round(segment.duration_seconds, 1),
+            "is_final": segment.is_final,
+        })
+
+    def _on_capture_error(self, message: str) -> None:
+        active = self._active
+        logger.critical("Capture failure: %s", message)
+        self._emit("integrity_alert", {
+            "session_id": active.session_id if active else None,
+            "alert_type": "capture_failed",
+            "detail": message,
+        })
+
+    def _check_capture_health(self, active: ActiveSession, stats) -> None:
+        if stats.overruns:
+            self._emit("integrity_alert", {
+                "session_id": active.session_id,
+                "alert_type": "capture_overrun",
+                "detail": f"{stats.overruns} chunk(s) dropped because the segmenter fell behind",
+            })
+        if stats.read_errors:
+            self._emit("integrity_alert", {
+                "session_id": active.session_id,
+                "alert_type": "capture_read_errors",
+                "detail": f"{stats.read_errors} read error(s) from the input device",
+            })
+
+    # ---- heartbeat ----
+
+    async def _heartbeat_loop(self) -> None:
+        """
+        Tell the server we are alive, and how deep the spool is.
+
+        A missing heartbeat is how a killed agent or a stalled upload queue becomes
+        visible centrally instead of being discovered weeks later.
+        """
+        interval = max(10, self.cfg.ops.heartbeat_seconds)
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                await self._uploader.heartbeat(self.heartbeat_payload())
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug("Heartbeat failed: %s", exc)
+
+    def heartbeat_payload(self) -> Dict[str, Any]:
+        upload = self._uploader.status()
+        active = self._active
+        return {
+            "device_id": self.device_id,
+            "app_version": self.cfg.app_version,
+            "protocol_version": self.cfg.protocol_version,
+            "state": self.state,
+            "session_id": active.session_id if active else None,
+            "spool_bytes": upload["spool_bytes"],
+            "spool_pressure": upload["spool_pressure"],
+            "pending_segments": upload["pending_segments"],
+            "sent_at": crypto.iso_utc(datetime.now(timezone.utc)),
+        }
+
+    # ---- status ----
+
+    def status(self) -> Dict[str, Any]:
+        active = self._active
+        upload = self._uploader.status()
+
+        payload: Dict[str, Any] = {
+            "state": self.state,
+            "is_recording": self.state == RECORDING,
+            "is_paused": self.state == PAUSED,
+            "session_id": active.session_id if active else None,
+            "patient_ref": active.grant.patient_ref if active else None,
+            "patient_name": active.patient_name if active else None,
+            "doctor_id": active.grant.doctor_id if active else None,
+            "hospital_id": active.grant.hospital_id if active else None,
+            "started_at": crypto.iso_utc(active.opened_at) if active else None,
+            "segment_count": len(active.spool.segments) if active else 0,
+            "duration_seconds": round(self._live_duration(active), 1) if active else 0.0,
+            "paused_seconds": round(active.paused_seconds, 1) if active else 0.0,
+            "upload": upload,
+            "spool_capacity_hours": round(self.cfg.spool_seconds() / 3600, 1),
+        }
+        if active and active.pause:
+            payload["pause"] = {
+                "reason": active.pause.reason,
+                "reason_detail": active.pause.reason_detail,
+                "authorised_by": active.pause.authorised_by,
+                "since": crypto.iso_utc(active.pause.started_at),
+                "seconds": round(time.monotonic() - active.pause.started_monotonic, 1),
+            }
+        return payload
+
+    @staticmethod
+    def _live_duration(active: Optional[ActiveSession]) -> float:
+        if active is None:
+            return 0.0
+        live = active.recorder.duration_seconds if active.recorder.is_running else 0.0
+        return active.audio_seconds + live
+
+    # ---- helpers ----
+
+    def _spawn(self, coro) -> None:
+        """
+        Run a backend call without blocking the control path.
+
+        Pause, resume and close must never wait on the network. The chain entry is
+        already durably journaled in the spool, and the full chain is delivered
+        again inside the manifest at close, so a failed notification costs nothing
+        but a little latency in the operator dashboard. Awaiting these calls made a
+        backend outage freeze pause and stop for the length of the retry schedule.
+        """
+        task = asyncio.create_task(coro)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    def _require_active(self) -> ActiveSession:
+        if self._active is None:
+            raise SessionError("No recording is in progress.")
+        return self._active
+
+    def _pseudonym(self, value: str) -> str:
+        if not self.cfg.ops.redact_logs:
+            return value
+        return crypto.pseudonymise(value, self._log_salt)
+
+    def _emit(self, event: str, data: Dict[str, Any]) -> None:
+        if event == "integrity_alert":
+            self.last_alert = f"{data.get('alert_type')}: {data.get('detail', '')}"
+        if self._on_event:
+            try:
+                self._on_event(event, data)
+            except Exception as exc:
+                logger.debug("Event handler for %s raised: %s", event, exc)
+
+
+__all__ = ["SessionController", "SessionError", "IDLE", "RECORDING", "PAUSED", "CLOSING"]

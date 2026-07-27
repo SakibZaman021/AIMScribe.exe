@@ -1,0 +1,268 @@
+"""
+The spool: encryption at rest, crash recovery, and the rules around deletion.
+
+These cover requirement R4 - audio is removed from the doctor's PC automatically,
+but only once the archive copy is proven to exist.
+"""
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from core import crypto
+from core.spool import (COMMITTED, PENDING, PURGED, RECEIPTED, SessionSpool,
+                        Spool, new_ulid, wav_bytes)
+from tests.conftest import pcm
+
+
+def _open(spool: Spool, device_key, audio_params, **overrides) -> SessionSpool:
+    kwargs = dict(
+        device_id="dev-1", doctor_id="DR001", hospital_id="HOSP001",
+        patient_ref="P12345", consent_method="verbal_at_reception",
+        audio=audio_params,
+    )
+    kwargs.update(overrides)
+    return spool.open_session(device_key=device_key, **kwargs)
+
+
+def _seal(session: SessionSpool, seconds: float = 1.0, **overrides):
+    start = overrides.pop("start", datetime(2026, 7, 26, 9, 30, tzinfo=timezone.utc))
+    return session.seal_segment(
+        pcm(seconds, value=1000),
+        captured_start_at=start,
+        captured_end_at=start + timedelta(seconds=seconds),
+        rms_mean=overrides.pop("rms_mean", 1000.0),
+        is_final=overrides.pop("is_final", False),
+    )
+
+
+# ============================================================
+# WAV framing
+# ============================================================
+
+def test_wav_header_is_canonical(audio_params):
+    """
+    The server re-hashes exactly these bytes, so the header must be byte-stable.
+    """
+    data = wav_bytes(pcm(1.0), **audio_params)
+    assert data[:4] == b"RIFF"
+    assert data[8:12] == b"WAVE"
+    assert len(data) == 44 + 44100 * 2
+    assert int.from_bytes(data[24:28], "little") == 44100
+    assert int.from_bytes(data[34:36], "little") == 16          # bits per sample
+    assert wav_bytes(pcm(1.0), **audio_params) == data          # deterministic
+
+
+# ============================================================
+# Sealing
+# ============================================================
+
+def test_sealed_segment_round_trips(spool, device_key, audio_params):
+    session = _open(spool, device_key, audio_params)
+    segment = _seal(session, seconds=2.0)
+
+    assert segment.seq_no == 1
+    assert segment.state == PENDING
+    assert pytest.approx(segment.duration_seconds, abs=0.01) == 2.0
+
+    audio = session.read_segment(1)
+    assert crypto.sha256_bytes(audio) == segment.sha256
+    assert audio[:4] == b"RIFF"
+
+
+def test_segment_is_encrypted_on_disk(spool, device_key, audio_params):
+    """A doctor with file access must not be able to read buffered audio."""
+    session = _open(spool, device_key, audio_params)
+    _seal(session, seconds=1.0)
+
+    raw = (session.directory / "seg-00001.aimspl").read_bytes()
+    assert raw.startswith(b"AIMSPL")
+    assert b"RIFF" not in raw          # no plaintext WAV header
+    assert b"data" not in raw
+
+
+def test_tampered_spool_file_fails_authentication(spool, device_key, audio_params):
+    session = _open(spool, device_key, audio_params)
+    _seal(session, seconds=1.0)
+
+    path = session.directory / "seg-00001.aimspl"
+    blob = bytearray(path.read_bytes())
+    blob[-1] ^= 0xFF
+    path.write_bytes(bytes(blob))
+
+    with pytest.raises(ValueError):
+        session.read_segment(1)
+
+
+def test_chain_grows_with_each_segment(spool, device_key, audio_params):
+    session = _open(spool, device_key, audio_params)
+    for _ in range(3):
+        _seal(session)
+
+    assert [e.entry_type for e in session.chain] == ["open", "segment", "segment", "segment"]
+    assert session.verify_chain()
+
+
+# ============================================================
+# Crash recovery
+# ============================================================
+
+def test_session_recovers_from_journal(spool, device_key, audio_params):
+    """A power cut must cost at most the segment still being captured."""
+    session = _open(spool, device_key, audio_params)
+    _seal(session, seconds=1.0)
+    _seal(session, seconds=1.0)
+    original_head = session.head_hash
+
+    # Simulate a restart: nothing in memory, only what reached disk.
+    recovered = SessionSpool.load(
+        session.directory, device_key=device_key, spool_key=spool._key)
+
+    assert recovered is not None
+    assert recovered.session_id == session.session_id
+    assert len(recovered.segments) == 2
+    assert recovered.head_hash == original_head
+    assert recovered.meta["patient_ref"] == "P12345"
+    assert recovered.verify_chain()
+    assert crypto.sha256_bytes(recovered.read_segment(1)) == session.segments[1].sha256
+
+
+def test_truncated_journal_line_is_survivable(spool, device_key, audio_params):
+    """The last line of a journal is exactly what a power cut truncates."""
+    session = _open(spool, device_key, audio_params)
+    _seal(session, seconds=1.0)
+
+    journal = session.directory / "journal.jsonl"
+    with open(journal, "a", encoding="utf-8") as handle:
+        handle.write('{"rec": "segment", "seq_no": 2, "fi')
+
+    recovered = SessionSpool.load(
+        session.directory, device_key=device_key, spool_key=spool._key)
+    assert recovered is not None
+    assert len(recovered.segments) == 1
+
+
+def test_recover_closes_interrupted_sessions(spool, device_key, audio_params):
+    session = _open(spool, device_key, audio_params)
+    _seal(session, seconds=1.0)
+
+    found = spool.recover(device_key)
+    assert len(found) == 1
+    assert found[0].session_id == session.session_id
+    assert found[0].closed_at is None       # controller closes it and records the gap
+
+
+# ============================================================
+# Deletion rules - R4
+# ============================================================
+
+def test_pending_segment_cannot_be_purged(spool, device_key, audio_params):
+    session = _open(spool, device_key, audio_params)
+    _seal(session)
+    assert not session.purge_segment(1)
+    assert (session.directory / "seg-00001.aimspl").exists()
+
+
+def test_committed_segment_cannot_be_purged(spool, device_key, audio_params):
+    """
+    Reaching object storage is not grounds for deleting the only other copy.
+    Only a verified purge receipt is.
+    """
+    session = _open(spool, device_key, audio_params)
+    _seal(session)
+    session.set_state(1, COMMITTED, object_key="audio/x/clip_1.wav")
+
+    assert not session.purge_segment(1)
+    assert (session.directory / "seg-00001.aimspl").exists()
+
+
+def test_receipted_segment_is_purged(spool, device_key, audio_params):
+    session = _open(spool, device_key, audio_params)
+    segment = _seal(session)
+    session.set_state(1, COMMITTED)
+    session.record_receipt(1, {"scope": "segment", "seq_no": 1,
+                               "sha256": segment.sha256.hex()}, b"\x00" * 64)
+
+    assert session.segments[1].state == RECEIPTED
+    assert session.purge_segment(1)
+    assert not (session.directory / "seg-00001.aimspl").exists()
+    assert session.segments[1].state == PURGED
+
+
+def test_session_not_complete_until_close_is_reported(spool, device_key, audio_params):
+    """
+    Guards a bug where the directory was deleted before the backend had accepted
+    the close, losing the journal for a session nobody had accounted for.
+    """
+    session = _open(spool, device_key, audio_params)
+    segment = _seal(session)
+    session.set_state(1, COMMITTED)
+    session.record_receipt(1, {"sha256": segment.sha256.hex()}, b"\x00" * 64)
+    session.purge_segment(1)
+
+    assert not session.is_complete            # never acknowledged, never closed
+
+    session.mark_acknowledged()
+    assert not session.is_complete            # still open
+
+    session.close(duration_seconds=1.0, paused_seconds=0.0)
+    assert not session.is_complete            # close not yet delivered
+
+    session.mark_close_reported()
+    assert session.is_complete
+
+
+def test_close_reported_survives_restart(spool, device_key, audio_params):
+    session = _open(spool, device_key, audio_params)
+    _seal(session)
+    session.mark_acknowledged()
+    session.close(duration_seconds=1.0, paused_seconds=0.0)
+    session.mark_close_reported()
+
+    recovered = SessionSpool.load(
+        session.directory, device_key=device_key, spool_key=spool._key)
+    assert recovered.close_reported
+    assert recovered.server_acknowledged
+    assert pytest.approx(recovered.duration_seconds) == 1.0
+
+
+# ============================================================
+# Capacity and identifiers
+# ============================================================
+
+def test_spool_reports_pressure(spool, device_key, audio_params):
+    assert spool.pressure() == "ok"
+    session = _open(spool, device_key, audio_params)
+    _seal(session, seconds=2.0)
+    assert spool.total_bytes() > 0
+
+
+def test_manifest_is_self_describing(spool, device_key, audio_params):
+    """The archive must be verifiable even if the database is lost."""
+    session = _open(spool, device_key, audio_params)
+    _seal(session)
+    session.close(duration_seconds=1.0, paused_seconds=0.0)
+
+    manifest = json.loads(json.dumps(session.manifest()))
+    assert manifest["audio"]["sample_rate"] == 44100
+    assert manifest["audio"]["codec"] == "pcm_s16le"
+    assert manifest["hospital_id"] == "HOSP001"
+    assert manifest["device_pubkey"] == device_key.public_bytes_raw().hex()
+    assert len(manifest["segments"]) == 1
+    assert manifest["chain_head"] == session.head_hash.hex()
+
+
+def test_ulid_is_sortable_and_unique():
+    ulids = [new_ulid() for _ in range(200)]
+    assert len(set(ulids)) == 200
+    assert all(len(value) == 26 for value in ulids)
+    # Crockford base32 excludes I, L, O and U to avoid transcription errors.
+    assert not set("ILOU") & set("".join(ulids))
+
+
+def test_session_id_does_not_leak_patient_id(spool, device_key, audio_params):
+    """Object keys are built from the session ID, which must carry no PHI."""
+    session = _open(spool, device_key, audio_params, patient_ref="P12345")
+    assert "P12345" not in session.session_id

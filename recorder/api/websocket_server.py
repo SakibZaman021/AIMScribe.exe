@@ -1,317 +1,291 @@
 """
-WebSocket Server for AIMScribe Recorder
-Enables direct browser-to-local-app communication.
+WebSocket control channel for the CMED browser.
 
-This is the industrial solution:
-- CMED (browser) connects via WebSocket to localhost:5050
-- Browser knows doctor_id (from CMED login)
-- Browser sends commands with full context
-- AIMScribe doesn't need login - it receives all info from browser
+This is the primary way CMED drives the recorder. The security model changed
+completely from v1, which checked `websocket.client.host` and accepted anything
+from 127.0.0.1 - that check always passes for *any* page open on the PC, because
+the peer address of a browser is always loopback. WebSockets are also not subject
+to CORS, so the wildcard CORS fix does not help here either.
+
+What is enforced now, in order, before the socket is accepted:
+
+1. `Origin` must be in the configured allowlist. Absent or "null" is rejected.
+2. `Host` must be an expected loopback authority. This is the DNS-rebinding
+   defence: `http://evil.example` can resolve to 127.0.0.1, and only the Host
+   header distinguishes it.
+3. The peer address must actually be loopback.
+
+And before any recording starts, the `start` command must carry a CMED-signed,
+single-use grant. Doctor, hospital and patient are read from that grant, never
+from the browser's own payload.
 """
+from __future__ import annotations
+
+import asyncio
 import json
 import logging
-import asyncio
-from datetime import datetime
-from typing import Dict, Set, Optional, Any
-from dataclasses import dataclass, asdict
+import time
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional, Set
 
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import WebSocket
+
+from core import crypto
+from core.crypto import GrantError
+from core.session_controller import SessionError
 
 logger = logging.getLogger(__name__)
 
+# Close codes reported to the browser. 4403 is our "policy refused".
+CLOSE_POLICY = 4403
+CLOSE_INTERNAL = 4500
 
-@dataclass
-class RecorderStatus:
-    """Current recorder status"""
-    is_recording: bool
-    session_id: Optional[str]
-    patient_id: Optional[str]
-    patient_name: Optional[str]
-    doctor_id: Optional[str]
-    hospital_id: Optional[str]
-    duration_seconds: float
-    connected_clients: int
+MAX_MESSAGE_BYTES = 64 * 1024
+
+
+class GrantGuard:
+    """
+    Single-use enforcement for recording grants.
+
+    A grant is a bearer token: without replay protection, a page that captured one
+    could reopen sessions with it until it expired. Entries are pruned lazily.
+    """
+
+    def __init__(self) -> None:
+        self._seen: Dict[str, float] = {}
+
+    def consume(self, grant: crypto.Grant) -> None:
+        now = time.time()
+        if len(self._seen) > 512:
+            self._seen = {jti: exp for jti, exp in self._seen.items() if exp > now}
+        if self._seen.get(grant.jti, 0) > now:
+            raise GrantError("grant has already been used")
+        self._seen[grant.jti] = float(grant.expires_at)
 
 
 class WebSocketManager:
-    """
-    Manages WebSocket connections from CMED (browser).
+    """Tracks connected CMED clients and dispatches their commands."""
 
-    Architecture:
-    - Browser (CMED) connects to ws://localhost:5050/ws
-    - Browser sends commands: start, stop, status
-    - AIMScribe sends events: recording_started, clip_uploaded, ner_ready
-    """
-
-    def __init__(self):
-        # Active WebSocket connections
-        self._connections: Set[WebSocket] = set()
-
-        # Session controller reference (set via set_controller)
-        self._controller = None
-
-        # Lock for thread safety
-        self._lock = asyncio.Lock()
-
-        logger.info("WebSocketManager initialized")
-
-    def set_controller(self, controller):
-        """Set the session controller reference"""
+    def __init__(self, cfg, *, controller=None, grant_guard: Optional[GrantGuard] = None):
+        self.cfg = cfg
         self._controller = controller
-        logger.info("Session controller linked to WebSocketManager")
+        self._guard = grant_guard or GrantGuard()
+        self._connections: Set[WebSocket] = set()
+        self._lock = asyncio.Lock()
+        self._grant_key = None
+
+    # ---- wiring ----
+
+    def set_controller(self, controller) -> None:
+        self._controller = controller
+
+    def set_grant_key(self, key) -> None:
+        self._grant_key = key
+
+    @property
+    def client_count(self) -> int:
+        return len(self._connections)
+
+    # ---- connection ----
 
     async def connect(self, websocket: WebSocket) -> bool:
-        """
-        Accept a new WebSocket connection.
-        Only accepts connections from localhost for security.
-        """
-        # Security: Only allow localhost connections
-        client_host = websocket.client.host if websocket.client else "unknown"
+        origin = websocket.headers.get("origin")
+        host = websocket.headers.get("host")
+        peer = websocket.client.host if websocket.client else None
 
-        if client_host not in ['127.0.0.1', 'localhost', '::1', '0.0.0.0']:
-            logger.warning(f"Rejected WebSocket connection from: {client_host}")
-            await websocket.close(code=4003, reason="Only localhost connections allowed")
+        if not self.cfg.security.origin_allowed(origin):
+            logger.warning("Rejected WebSocket: origin %r is not allowed", origin)
+            await websocket.close(code=CLOSE_POLICY, reason="origin not allowed")
+            return False
+
+        if not self.cfg.security.host_allowed(host):
+            logger.warning("Rejected WebSocket: host %r is not allowed (possible DNS rebinding)",
+                           host)
+            await websocket.close(code=CLOSE_POLICY, reason="host not allowed")
+            return False
+
+        if peer not in ("127.0.0.1", "::1"):
+            logger.warning("Rejected WebSocket from non-loopback peer %r", peer)
+            await websocket.close(code=CLOSE_POLICY, reason="loopback only")
             return False
 
         await websocket.accept()
-
         async with self._lock:
             self._connections.add(websocket)
+        logger.info("CMED connected from %s (%s client(s))", origin, len(self._connections))
 
-        logger.info(f"WebSocket connected from {client_host}. Total: {len(self._connections)}")
-
-        # Send initial status
-        await self._send_status(websocket)
-
+        await self._send(websocket, self._status_event())
         return True
 
-    async def disconnect(self, websocket: WebSocket):
-        """Handle WebSocket disconnection"""
+    async def disconnect(self, websocket: WebSocket) -> None:
         async with self._lock:
             self._connections.discard(websocket)
+        logger.info("CMED disconnected (%s client(s) remain)", len(self._connections))
 
-        logger.info(f"WebSocket disconnected. Total: {len(self._connections)}")
+    # ---- dispatch ----
 
-    async def handle_message(self, websocket: WebSocket, data: str) -> Dict[str, Any]:
-        """
-        Handle incoming message from CMED browser.
-
-        Commands:
-        - start: Start recording with patient context
-        - stop: Stop current recording
-        - status: Get current status
-        """
-        try:
-            message = json.loads(data)
-            command = message.get('command', '').lower()
-
-            logger.info(f"Received command: {command}")
-
-            if command == 'start':
-                return await self._handle_start(message)
-
-            elif command == 'stop':
-                return await self._handle_stop(message)
-
-            elif command == 'status':
-                return await self._handle_status()
-
-            else:
-                return {
-                    "event": "error",
-                    "error": f"Unknown command: {command}",
-                    "timestamp": datetime.utcnow().isoformat() + "Z"
-                }
-
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON: {e}")
-            return {
-                "event": "error",
-                "error": "Invalid JSON format",
-                "timestamp": datetime.utcnow().isoformat() + "Z"
-            }
-
-        except Exception as e:
-            logger.error(f"Error handling message: {e}", exc_info=True)
-            return {
-                "event": "error",
-                "error": str(e),
-                "timestamp": datetime.utcnow().isoformat() + "Z"
-            }
-
-    async def _handle_start(self, message: Dict) -> Dict[str, Any]:
-        """Handle start recording command"""
-        if self._controller is None:
-            return {
-                "event": "error",
-                "error": "Controller not initialized",
-                "timestamp": datetime.utcnow().isoformat() + "Z"
-            }
-
-        # Extract session info from message
-        session = message.get('session', {})
-        health_screening = message.get('health_screening', {})
-        callback = message.get('callback', {})
-
-        # Import here to avoid circular imports
-        from core.session_controller import SessionContext
-
-        # Create session context from browser data
-        context = SessionContext(
-            patient_id=session.get('patient_id', ''),
-            patient_name=session.get('patient_name', ''),
-            age=str(session.get('age', '')),
-            gender=session.get('gender', ''),
-            doctor_id=session.get('doctor_id', 'UNKNOWN'),
-            hospital_id=session.get('hospital_id', 'UNKNOWN'),
-            health_screening=health_screening,
-            ner_webhook_url=callback.get('ner_webhook_url', ''),
-            status_webhook_url=callback.get('status_webhook_url', '')
-        )
-
-        logger.info(f"Starting recording for patient: {context.patient_id}")
-        logger.info(f"Doctor: {context.doctor_id}, Hospital: {context.hospital_id}")
-
-        # Start recording
-        result = await self._controller.handle_trigger(context)
-
-        # Build response
-        response = {
-            "event": "recording_started",
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "session_id": result.get('session_id'),
-            "patient_id": context.patient_id,
-            "doctor_id": context.doctor_id,
-            "hospital_id": context.hospital_id,
-            "previous_session_stopped": result.get('previous_session_stopped', False)
-        }
-
-        # Broadcast to all connected clients
-        await self.broadcast(response)
-
-        return response
-
-    async def _handle_stop(self, message: Dict) -> Dict[str, Any]:
-        """Handle stop recording command"""
-        if self._controller is None:
-            return {
-                "event": "error",
-                "error": "Controller not initialized",
-                "timestamp": datetime.utcnow().isoformat() + "Z"
-            }
-
-        logger.info("Stopping recording")
-
-        result = await self._controller.handle_stop()
-
-        response = {
-            "event": "recording_stopped",
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "session_id": result.get('session_id'),
-            "status": result.get('status'),
-            "duration_seconds": result.get('duration_seconds', 0)
-        }
-
-        # Broadcast to all connected clients
-        await self.broadcast(response)
-
-        return response
-
-    async def _handle_status(self) -> Dict[str, Any]:
-        """Handle status request"""
-        status = self._get_status()
-
-        return {
-            "event": "status",
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            **asdict(status)
-        }
-
-    async def _send_status(self, websocket: WebSocket):
-        """Send current status to a specific client"""
-        status = self._get_status()
-
-        message = {
-            "event": "status",
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            **asdict(status)
-        }
+    async def handle_message(self, websocket: WebSocket, raw: str) -> Dict[str, Any]:
+        if len(raw) > MAX_MESSAGE_BYTES:
+            return self._error("message too large")
 
         try:
-            await websocket.send_json(message)
-        except Exception as e:
-            logger.warning(f"Failed to send status: {e}")
+            message = json.loads(raw)
+        except json.JSONDecodeError:
+            return self._error("invalid JSON")
 
-    def _get_status(self) -> RecorderStatus:
-        """Get current recorder status"""
+        if not isinstance(message, dict):
+            return self._error("expected a JSON object")
+
+        command = str(message.get("command", "")).lower()
         if self._controller is None:
-            return RecorderStatus(
-                is_recording=False,
-                session_id=None,
-                patient_id=None,
-                patient_name=None,
-                doctor_id=None,
-                hospital_id=None,
-                duration_seconds=0,
-                connected_clients=len(self._connections)
+            return self._error("recorder is not ready")
+
+        handlers = {
+            "start": self._start,
+            "stop": self._stop,
+            "pause": self._pause,
+            "resume": self._resume,
+            "status": self._status,
+        }
+        handler = handlers.get(command)
+        if handler is None:
+            return self._error(f"unknown command: {command or '(none)'}")
+
+        try:
+            return await handler(message)
+        except SessionError as exc:
+            # Expected refusals: safe to show the doctor verbatim.
+            logger.info("Command %s refused: %s", command, exc)
+            return self._error(str(exc), code="refused")
+        except GrantError as exc:
+            logger.warning("Command %s rejected: %s", command, exc)
+            return self._error("Authorisation failed. Reload CMED and try again.",
+                               code="unauthorised")
+        except Exception as exc:
+            logger.error("Command %s failed: %s", command, exc, exc_info=True)
+            return self._error("The recorder hit an internal error.", code="internal")
+
+    # ---- commands ----
+
+    async def _start(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        grant_token = message.get("grant")
+
+        if self.cfg.security.require_grant:
+            if self._grant_key is None:
+                raise GrantError("no grant verification key is installed")
+            grant = crypto.verify_grant(
+                grant_token,
+                self._grant_key,
+                issuer=self.cfg.security.grant_issuer,
+                audience=self.cfg.security.grant_audience,
             )
+            self._guard.consume(grant)
+        else:
+            # Development only; config.production_warnings() surfaces this loudly.
+            session = message.get("session", {}) or {}
+            logger.warning("Starting a session WITHOUT a grant (development mode)")
+            grant = crypto.Grant(
+                jti=f"dev-{time.time()}",
+                doctor_id=str(session.get("doctor_id", "DR_DEV")),
+                doctor_name=str(session.get("doctor_name", "")),
+                hospital_id=str(session.get("hospital_id", "HOSP_DEV")),
+                patient_ref=str(session.get("patient_id") or session.get("patient_ref") or ""),
+                consent_obtained=True,
+                consent_method="development",
+                expires_at=int(time.time()) + 60,
+                raw="",
+            )
+            if not grant.patient_ref:
+                raise SessionError("A patient reference is required.")
 
-        ctrl_status = self._controller.get_status()
+        # Display-only fields may come from the browser; identity may not.
+        patient_name = str((message.get("session") or {}).get("patient_name", ""))[:120]
 
-        return RecorderStatus(
-            is_recording=ctrl_status.get('is_recording', False),
-            session_id=ctrl_status.get('session_id'),
-            patient_id=ctrl_status.get('patient_id'),
-            patient_name=ctrl_status.get('patient_name'),
-            doctor_id=ctrl_status.get('doctor_id'),
-            hospital_id=ctrl_status.get('hospital_id'),
-            duration_seconds=ctrl_status.get('duration_seconds', 0),
-            connected_clients=len(self._connections)
+        result = await self._controller.open_session(grant, patient_name=patient_name)
+        return self._ack("start", result)
+
+    async def _stop(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        result = await self._controller.stop_session(reason="doctor_stopped")
+        return self._ack("stop", result)
+
+    async def _pause(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Supervised pause. Reason is mandatory; long pauses need a supervisor."""
+        result = await self._controller.pause_session(
+            reason=str(message.get("reason", "")),
+            reason_detail=str(message.get("reason_detail", ""))[:500],
+            authorised_by=str(message.get("authorised_by", ""))[:120],
+            expected_seconds=int(message.get("expected_seconds", 0) or 0),
         )
+        return self._ack("pause", result)
 
-    async def broadcast(self, message: Dict[str, Any]):
-        """Broadcast message to all connected clients"""
-        if not self._connections:
+    async def _resume(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        result = await self._controller.resume_session()
+        return self._ack("resume", result)
+
+    async def _status(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        return self._status_event()
+
+    # ---- outbound ----
+
+    def _status_event(self) -> Dict[str, Any]:
+        status = self._controller.status() if self._controller else {"state": "starting"}
+        return self._stamp({"event": "status", **status,
+                            "connected_clients": len(self._connections)})
+
+    async def send_event(self, event_type: str, data: Dict[str, Any]) -> None:
+        await self.broadcast(self._stamp({"event": event_type, **data}))
+
+    async def broadcast(self, message: Dict[str, Any]) -> None:
+        """
+        Fan out to every client concurrently.
+
+        v1 awaited each send while holding the connection lock, so one wedged
+        client blocked every broadcast and every connect. The set is snapshotted
+        instead, and sends run in parallel outside the lock.
+        """
+        async with self._lock:
+            targets = list(self._connections)
+        if not targets:
             return
 
-        dead_connections = set()
-
-        async with self._lock:
-            for websocket in self._connections:
-                try:
-                    await websocket.send_json(message)
-                except Exception as e:
-                    logger.warning(f"Failed to send to client: {e}")
-                    dead_connections.add(websocket)
-
-        # Clean up dead connections
-        if dead_connections:
+        results = await asyncio.gather(
+            *(self._send(socket, message) for socket in targets),
+            return_exceptions=True,
+        )
+        dead = {socket for socket, outcome in zip(targets, results)
+                if isinstance(outcome, Exception) or outcome is False}
+        if dead:
             async with self._lock:
-                self._connections -= dead_connections
+                self._connections -= dead
 
-    async def send_event(self, event_type: str, data: Dict[str, Any]):
+    @staticmethod
+    async def _send(websocket: WebSocket, message: Dict[str, Any]) -> bool:
+        try:
+            await websocket.send_json(message)
+            return True
+        except Exception:
+            return False
+
+    # ---- helpers ----
+
+    @staticmethod
+    def _stamp(payload: Dict[str, Any]) -> Dict[str, Any]:
+        payload.setdefault("timestamp", crypto.iso_utc(datetime.now(timezone.utc)))
+        return payload
+
+    def _ack(self, command: str, data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Send an event to all connected CMED clients.
+        Reply to the sender only.
 
-        Use this to notify browser about:
-        - clip_uploaded: A chunk was uploaded to backend
-        - ner_ready: NER results available
-        - error: Something went wrong
+        State changes reach every client as broadcast events emitted by the
+        controller. Commands previously broadcast *and* returned the same object,
+        so the caller saw each state change two or three times and could not tell
+        an acknowledgement from an event.
         """
-        message = {
-            "event": event_type,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            **data
-        }
+        return self._stamp({"event": "ack", "command": command, "data": data})
 
-        await self.broadcast(message)
-        logger.info(f"Broadcasted event: {event_type}")
+    def _error(self, message: str, *, code: str = "error") -> Dict[str, Any]:
+        return self._stamp({"event": "error", "code": code, "message": message})
 
 
-# Global WebSocket manager instance
-ws_manager = WebSocketManager()
-
-
-def get_ws_manager() -> WebSocketManager:
-    """Get the global WebSocket manager"""
-    return ws_manager
+__all__ = ["WebSocketManager", "GrantGuard", "CLOSE_POLICY"]

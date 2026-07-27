@@ -1,257 +1,270 @@
 """
-Audio Recorder Module
-Records audio from microphone at 32kHz, mono, 16-bit.
-Feeds audio to splitter and accumulates full recording.
-"""
-import os
-import wave
-import threading
-import logging
-from datetime import datetime
-from typing import Optional, Callable, List
+Audio capture.
 
-import pyaudio
+Records WAV PCM from the default input device and hands raw chunks to a consumer
+on another thread. The capture thread does nothing but read from PortAudio and
+enqueue - no hashing, no loudness maths, no file writes - because anything slow
+here shows up as dropped frames in the recording.
+
+Changes from v1 that matter:
+
+* No singleton. The old `get_instance`/`reset_instance` pair mutated a live
+  object's `_initialized` flag while its capture thread was still running, and
+  closed the PortAudio stream on a 2-second timeout regardless. One recorder is
+  now owned by one session.
+* The whole consultation is no longer accumulated in RAM. Memory is bounded by
+  the queue plus the segment being assembled, so a three-hour session costs the
+  same as a three-minute one.
+* Stop is ordered: the capture loop is asked to finish, joined, and only then is
+  the stream closed.
+"""
+from __future__ import annotations
+
+import logging
+import queue
+import threading
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Callable, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class CaptureStats:
+    """Health counters surfaced in the heartbeat and in integrity alerts."""
+    frames: int = 0
+    bytes_captured: int = 0
+    overruns: int = 0          # consumer fell behind; audio was dropped
+    read_errors: int = 0       # PortAudio read failures
+    device_changes: int = 0
+    started_at: Optional[datetime] = None
+    stopped_at: Optional[datetime] = None
+
+    def as_dict(self) -> dict:
+        return {
+            "frames": self.frames,
+            "bytes_captured": self.bytes_captured,
+            "overruns": self.overruns,
+            "read_errors": self.read_errors,
+            "device_changes": self.device_changes,
+        }
+
+
+@dataclass
+class InputDevice:
+    index: int
+    name: str
+    channels: int
+    default_sample_rate: float
+
+
+class AudioCaptureError(RuntimeError):
+    """Raised when the input device cannot be opened."""
+
+
 class AudioRecorder:
     """
-    Audio recorder using PyAudio.
-    - Records at 32kHz, mono, 16-bit
-    - Thread-safe with pause/resume support
-    - Feeds audio chunks to splitter callback
-    - Accumulates full recording for final file
+    One PyAudio input stream feeding a consumer callback.
+
+    The consumer must be cheap and non-blocking; `Segmenter.submit` is designed
+    for exactly this and does a single queue put.
     """
 
-    _instance: Optional["AudioRecorder"] = None
-    _lock = threading.Lock()
+    # ~23 s of audio at 44.1 kHz with 2048-frame buffers. Deep enough that a brief
+    # disk or GC stall cannot cost frames, shallow enough to bound memory.
+    QUEUE_DEPTH = 512
 
-    def __new__(cls):
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = super().__new__(cls)
-                cls._instance._initialized = False
-            return cls._instance
+    def __init__(
+        self,
+        *,
+        sample_rate: int,
+        channels: int,
+        sample_width: int,
+        frames_per_buffer: int,
+        input_device_index: Optional[int] = None,
+        on_chunk: Optional[Callable[[bytes], None]] = None,
+        on_error: Optional[Callable[[str], None]] = None,
+    ):
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.sample_width = sample_width
+        self.frames_per_buffer = frames_per_buffer
+        self.input_device_index = input_device_index
 
-    def __init__(self):
-        if self._initialized:
-            return
+        self._on_chunk = on_chunk
+        self._on_error = on_error
 
-        self._initialized = True
+        self._pyaudio = None
+        self._stream = None
+        self._thread: Optional[threading.Thread] = None
+        self._running = threading.Event()
+        self._state_lock = threading.RLock()
 
-        # Audio settings
-        self.sample_rate = 32000
-        self.channels = 1
-        self.sample_width = 2  # 16-bit
-        self.chunk_size = 1024
-        self.format = pyaudio.paInt16
+        self.stats = CaptureStats()
 
-        # State
-        self._recording = False
-        self._paused = False
-        self._stream: Optional[pyaudio.Stream] = None
-        self._pyaudio: Optional[pyaudio.PyAudio] = None
+    # ---- device discovery ----
 
-        # Locks
-        self._state_lock = threading.Lock()
-        self._data_lock = threading.Lock()
+    @staticmethod
+    def list_input_devices() -> List[InputDevice]:
+        """Enumerate input devices, for the tray's device picker and for diagnostics."""
+        import pyaudio
 
-        # Audio buffers
-        self._full_recording: List[bytes] = []
-        self._chunk_callbacks: List[Callable[[bytes], None]] = []
+        found: List[InputDevice] = []
+        handle = pyaudio.PyAudio()
+        try:
+            for index in range(handle.get_device_count()):
+                try:
+                    info = handle.get_device_info_by_index(index)
+                except Exception:
+                    continue
+                if int(info.get("maxInputChannels", 0)) > 0:
+                    found.append(InputDevice(
+                        index=index,
+                        name=str(info.get("name", f"device {index}")),
+                        channels=int(info["maxInputChannels"]),
+                        default_sample_rate=float(info.get("defaultSampleRate", 0.0)),
+                    ))
+        finally:
+            handle.terminate()
+        return found
 
-        # Recording metadata
-        self._start_time: Optional[datetime] = None
-        self._recording_thread: Optional[threading.Thread] = None
+    def describe_device(self) -> str:
+        try:
+            devices = self.list_input_devices()
+        except Exception:
+            return "unknown"
+        if self.input_device_index is None:
+            return devices[0].name if devices else "no input device"
+        for device in devices:
+            if device.index == self.input_device_index:
+                return device.name
+        return f"index {self.input_device_index} (not present)"
 
-        # Session info
-        self.patient_id: str = ""
-        self.doctor_id: str = ""
-        self.hospital_id: str = ""
+    # ---- lifecycle ----
 
-        logger.info(f"AudioRecorder initialized: {self.sample_rate}Hz, {self.channels}ch, 16-bit")
+    @property
+    def is_running(self) -> bool:
+        return self._running.is_set()
 
-    @classmethod
-    def get_instance(cls) -> "AudioRecorder":
-        """Get singleton instance"""
-        return cls()
+    def start(self) -> None:
+        import pyaudio
 
-    @classmethod
-    def reset_instance(cls):
-        """Reset singleton instance (for new recording)"""
-        with cls._lock:
-            if cls._instance:
-                cls._instance._initialized = False
-            cls._instance = None
-
-    def add_chunk_callback(self, callback: Callable[[bytes], None]):
-        """Add callback to receive audio chunks"""
-        with self._data_lock:
-            if callback not in self._chunk_callbacks:
-                self._chunk_callbacks.append(callback)
-
-    def remove_chunk_callback(self, callback: Callable[[bytes], None]):
-        """Remove chunk callback"""
-        with self._data_lock:
-            if callback in self._chunk_callbacks:
-                self._chunk_callbacks.remove(callback)
-
-    def set_session_info(self, patient_id: str, doctor_id: str, hospital_id: str):
-        """Set session info for file naming"""
-        self.patient_id = patient_id
-        self.doctor_id = doctor_id
-        self.hospital_id = hospital_id
-
-    def start_recording(self) -> bool:
-        """Start recording audio."""
         with self._state_lock:
-            if self._recording:
-                logger.warning("Already recording")
-                return False
+            if self._running.is_set():
+                logger.warning("Capture already running")
+                return
 
             try:
                 self._pyaudio = pyaudio.PyAudio()
                 self._stream = self._pyaudio.open(
-                    format=self.format,
+                    format=pyaudio.paInt16 if self.sample_width == 2 else pyaudio.paInt32,
                     channels=self.channels,
                     rate=self.sample_rate,
                     input=True,
-                    frames_per_buffer=self.chunk_size
+                    input_device_index=self.input_device_index,
+                    frames_per_buffer=self.frames_per_buffer,
                 )
+            except Exception as exc:
+                self._teardown_stream()
+                raise AudioCaptureError(f"cannot open input device: {exc}") from exc
 
-                with self._data_lock:
-                    self._full_recording.clear()
+            self.stats = CaptureStats(started_at=datetime.now(timezone.utc))
+            self._running.set()
+            self._thread = threading.Thread(
+                target=self._capture_loop, name="AudioCapture", daemon=True)
+            self._thread.start()
+            logger.info("Capture started: %s Hz, %s ch, %s-bit, device=%s",
+                        self.sample_rate, self.channels, self.sample_width * 8,
+                        self.describe_device())
 
-                self._recording = True
-                self._paused = False
-                self._start_time = datetime.now()
+    def stop(self) -> CaptureStats:
+        """Ask the capture loop to finish, wait for it, then release the device."""
+        with self._state_lock:
+            if not self._running.is_set():
+                return self.stats
+            self._running.clear()
 
-                self._recording_thread = threading.Thread(
-                    target=self._recording_loop,
-                    daemon=True,
-                    name="AudioRecorderThread"
-                )
-                self._recording_thread.start()
+        thread = self._thread
+        if thread and thread.is_alive():
+            # Generous relative to one buffer period; the loop exits after at most
+            # one blocking read.
+            thread.join(timeout=5.0)
+            if thread.is_alive():
+                logger.error("Capture thread did not exit; releasing the device anyway")
 
-                logger.info("Recording started")
-                return True
+        self._teardown_stream()
+        self.stats.stopped_at = datetime.now(timezone.utc)
+        logger.info("Capture stopped: %.1f s, %s overruns, %s read errors",
+                    self.duration_seconds, self.stats.overruns, self.stats.read_errors)
+        return self.stats
 
-            except Exception as e:
-                logger.error(f"Failed to start recording: {e}")
-                self._cleanup_stream()
-                return False
+    def _teardown_stream(self) -> None:
+        stream, handle = self._stream, self._pyaudio
+        self._stream, self._pyaudio = None, None
+        try:
+            if stream is not None:
+                if stream.is_active():
+                    stream.stop_stream()
+                stream.close()
+        except Exception as exc:
+            logger.warning("Error closing audio stream: %s", exc)
+        try:
+            if handle is not None:
+                handle.terminate()
+        except Exception as exc:
+            logger.warning("Error terminating PyAudio: %s", exc)
 
-    def _recording_loop(self):
-        """Main recording loop - runs in separate thread"""
-        while self._recording:
-            if self._paused:
-                threading.Event().wait(0.01)
+    # ---- capture ----
+
+    def _capture_loop(self) -> None:
+        stream = self._stream
+        chunk_frames = self.frames_per_buffer
+        consecutive_errors = 0
+
+        while self._running.is_set():
+            try:
+                data = stream.read(chunk_frames, exception_on_overflow=False)
+                consecutive_errors = 0
+            except Exception as exc:
+                self.stats.read_errors += 1
+                consecutive_errors += 1
+                logger.error("Audio read failed (%s in a row): %s", consecutive_errors, exc)
+                # A handful of transient failures happen when a device is switched.
+                # A sustained run means the device is gone and recording is not
+                # actually happening, which the caller must be told about.
+                if consecutive_errors >= 20:
+                    if self._on_error:
+                        self._on_error(f"input device failed: {exc}")
+                    break
+                time.sleep(0.05)
                 continue
 
+            self.stats.frames += chunk_frames
+            self.stats.bytes_captured += len(data)
+
+            if self._on_chunk is None:
+                continue
             try:
-                data = self._stream.read(self.chunk_size, exception_on_overflow=False)
+                self._on_chunk(data)
+            except queue.Full:
+                # Never block the capture thread: blocking here guarantees a
+                # PortAudio overrun, which loses the same audio and corrupts timing.
+                self.stats.overruns += 1
+                if self.stats.overruns in (1, 10, 100) or self.stats.overruns % 1000 == 0:
+                    logger.critical("Segmenter is not keeping up; %s chunk(s) dropped",
+                                    self.stats.overruns)
+            except Exception as exc:
+                logger.error("Chunk consumer raised: %s", exc)
 
-                with self._data_lock:
-                    self._full_recording.append(data)
+    # ---- metrics ----
 
-                    for callback in self._chunk_callbacks:
-                        try:
-                            callback(data)
-                        except Exception as e:
-                            logger.error(f"Callback error: {e}")
+    @property
+    def bytes_per_second(self) -> int:
+        return self.sample_rate * self.channels * self.sample_width
 
-            except Exception as e:
-                if self._recording:
-                    logger.error(f"Recording error: {e}")
-                break
-
-    def is_recording(self) -> bool:
-        """Check if currently recording"""
-        return self._recording
-
-    def get_duration(self) -> float:
-        """Get current recording duration in seconds"""
-        if not self._start_time:
-            return 0.0
-        with self._data_lock:
-            total_frames = len(self._full_recording) * self.chunk_size
-            return total_frames / self.sample_rate
-
-    def get_start_time(self) -> Optional[datetime]:
-        """Get recording start time"""
-        return self._start_time
-
-    def stop_recording(self, recordings_dir: str = "recordings") -> Optional[str]:
-        """Stop recording and save the full audio file."""
-        with self._state_lock:
-            if not self._recording:
-                logger.warning("Not recording")
-                return None
-
-            self._recording = False
-            self._paused = False
-
-        if self._recording_thread:
-            self._recording_thread.join(timeout=2.0)
-
-        self._cleanup_stream()
-
-        end_time = datetime.now()
-        filepath = self._save_full_recording(end_time, recordings_dir)
-
-        return filepath
-
-    def _cleanup_stream(self):
-        """Clean up PyAudio stream"""
-        try:
-            if self._stream:
-                self._stream.stop_stream()
-                self._stream.close()
-                self._stream = None
-        except Exception as e:
-            logger.error(f"Error closing stream: {e}")
-
-        try:
-            if self._pyaudio:
-                self._pyaudio.terminate()
-                self._pyaudio = None
-        except Exception as e:
-            logger.error(f"Error terminating PyAudio: {e}")
-
-    def _save_full_recording(self, end_time: datetime, recordings_dir: str) -> Optional[str]:
-        """Save the full recording to a WAV file"""
-        if not self._full_recording:
-            logger.warning("No audio data to save")
-            return None
-
-        try:
-            os.makedirs(recordings_dir, exist_ok=True)
-
-            start_str = self._start_time.strftime("%H_%M")
-            end_str = end_time.strftime("%H_%M")
-            date_str = self._start_time.strftime("%Y_%m_%d")
-
-            filename = f"{self.patient_id}_{self.doctor_id}_{self.hospital_id}_{start_str}_{end_str}_{date_str}.wav"
-            filepath = os.path.join(recordings_dir, filename)
-
-            with self._data_lock:
-                audio_data = b"".join(self._full_recording)
-
-            with wave.open(filepath, "wb") as wf:
-                wf.setnchannels(self.channels)
-                wf.setsampwidth(self.sample_width)
-                wf.setframerate(self.sample_rate)
-                wf.writeframes(audio_data)
-
-            logger.info(f"Full recording saved: {filepath} ({len(audio_data)} bytes)")
-            return filepath
-
-        except Exception as e:
-            logger.error(f"Failed to save recording: {e}")
-            return None
-
-
-def get_recorder() -> AudioRecorder:
-    """Get the singleton recorder instance"""
-    return AudioRecorder.get_instance()
+    @property
+    def duration_seconds(self) -> float:
+        """Duration derived from captured bytes, so it never drifts from the audio."""
+        return self.stats.bytes_captured / max(1, self.bytes_per_second)
