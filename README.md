@@ -96,8 +96,27 @@ npm install
 npm run dev
 ```
 
-Copy `.env.local.example` to `.env.local` first and fill it in. Generate a
-doctor password with `node scripts/hash-password.mjs "the password"`.
+Copy `.env.local.example` to `.env.local` first and fill it in.
+
+There is no doctor login. Doctors are chosen from a register:
+
+```
+AIMS_DOCTORS=DR001:Dr Sakib Zaman,DR002:Dr Ayesha Rahman
+```
+
+That keeps the value a real person rather than free text — without it,
+`doctor_id` is whatever the browser sends, and the archive is filed by doctor,
+so a typo creates a folder nobody will ever open again.
+
+It is a selection, not proof of who is at the keyboard. Anyone who can open the
+page can pick any name on the list. The hospital cannot be faked the same way:
+the agent checks the grant against the hospital its device was enrolled at and
+refuses a mismatch. When attribution has to hold up in a dispute, replace
+`resolveDoctor()` in `src/lib/doctors.ts` with the hospital's identity provider;
+nothing else changes.
+
+Check a deployment with `GET /api/config-check`, which reports which variables
+are set without ever returning a value.
 
 ### Backend and archive
 

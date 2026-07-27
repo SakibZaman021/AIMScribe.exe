@@ -28,6 +28,9 @@ export interface AgentStatus {
   isPaused: boolean;
   sessionId: string | null;
   patientRef: string | null;
+  /** The hospital this machine is enrolled at. Authoritative; not a page choice. */
+  hospitalId: string | null;
+  doctorId: string | null;
   durationSeconds: number;
   pausedSeconds: number;
   segmentCount: number;
@@ -55,6 +58,8 @@ const EMPTY_STATUS: AgentStatus = {
   isPaused: false,
   sessionId: null,
   patientRef: null,
+  hospitalId: null,
+  doctorId: null,
   durationSeconds: 0,
   pausedSeconds: 0,
   segmentCount: 0,
@@ -126,11 +131,12 @@ export class AimscribeClient {
   /**
    * Start recording.
    *
-   * Fetches a grant from our own server first. The doctor and hospital in that
-   * grant come from the server session, so nothing the browser says about
-   * identity is trusted.
+   * Fetches a grant from our own server first. The agent refuses to record
+   * without one, and only that route can mint one - so the browser cannot start
+   * a recording on its own, even though it now names the doctor.
    */
   async start(options: {
+    doctorId: string;
     patientRef: string;
     patientName?: string;
     hospitalId?: string;
@@ -145,6 +151,7 @@ export class AimscribeClient {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        doctor_id: options.doctorId,
         patient_ref: options.patientRef,
         hospital_id: options.hospitalId,
         consent_obtained: options.consentObtained,
@@ -290,6 +297,8 @@ function mapStatus(message: any): AgentStatus {
     isPaused: Boolean(message.is_paused),
     sessionId: message.session_id ?? null,
     patientRef: message.patient_ref ?? null,
+    hospitalId: message.hospital_id ?? null,
+    doctorId: message.doctor_id ?? null,
     durationSeconds: Number(message.duration_seconds ?? 0),
     pausedSeconds: Number(message.paused_seconds ?? 0),
     segmentCount: Number(message.segment_count ?? 0),

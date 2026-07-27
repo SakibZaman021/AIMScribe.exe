@@ -41,11 +41,15 @@ interface PatientData {
   health_screening: Record<string, string>;
 }
 
-interface DoctorSession {
+interface Doctor {
   doctor_id: string;
-  doctor_name: string;
-  hospital_ids: string[];
+  name: string;
 }
+
+// Which hospital this consultation belongs to. The agent cross-checks it
+// against the hospital its device was enrolled at and refuses a mismatch, so
+// this cannot misfile a recording - but it does have to be set.
+const DEFAULT_HOSPITAL = process.env.NEXT_PUBLIC_HOSPITAL_ID || 'HOSP001';
 
 interface NERFields {
   chief_complaints?: { data: string[] };
@@ -63,8 +67,9 @@ interface NERFields {
 export default function DashboardPage() {
   const router = useRouter();
 
-  const [doctor, setDoctor] = useState<DoctorSession | null>(null);
-  const [hospitalId, setHospitalId] = useState('');
+  const [register, setRegister] = useState<Doctor[]>([]);
+  const [doctor, setDoctor] = useState<Doctor | null>(null);
+  const [hospitalId, setHospitalId] = useState(DEFAULT_HOSPITAL);
   const [patientData, setPatientData] = useState<PatientData | null>(null);
 
   const clientRef = useRef<AimscribeClient | null>(null);
@@ -87,29 +92,37 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  // ---- session and patient ----
+  // ---- doctor register and patient ----
 
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
       try {
-        const response = await fetch('/api/auth/login', { credentials: 'same-origin' });
-        if (!response.ok) {
-          router.push('/login');
-          return;
-        }
+        const response = await fetch('/api/doctors', { credentials: 'same-origin' });
         const data = await response.json();
         if (cancelled) return;
-        setDoctor(data);
-        setHospitalId(data.hospital_ids?.[0] ?? '');
+
+        const doctors: Doctor[] = data.doctors ?? [];
+        setRegister(doctors);
+
+        if (doctors.length === 0) {
+          setError(
+            'No doctors are configured. Set AIMS_DOCTORS before recording, ' +
+            'or the consultation cannot be attributed to anyone.'
+          );
+          return;
+        }
+
+        // Remember the last choice per browser. Convenience only - it is not a
+        // credential and confers nothing.
+        const remembered = localStorage.getItem('aims_doctor_id');
+        setDoctor(doctors.find((d) => d.doctor_id === remembered) ?? doctors[0]);
       } catch {
-        if (!cancelled) router.push('/login');
+        if (!cancelled) setError('Could not load the doctor list.');
       }
     })();
 
-    // Demographics only. The doctor's identity is never taken from here - it
-    // comes from the server session, which the browser cannot edit.
     const stored = sessionStorage.getItem('patientData');
     if (stored) {
       try {
@@ -245,10 +258,13 @@ export default function DashboardPage() {
   const handleStart = () =>
     withBusy(async () => {
       if (!patientData) throw new Error('No patient selected.');
+      if (!doctor) throw new Error('Select the doctor conducting this consultation.');
       if (!consentGiven) {
         throw new Error('Confirm the patient has agreed to be recorded before starting.');
       }
+      localStorage.setItem('aims_doctor_id', doctor.doctor_id);
       await clientRef.current!.start({
+        doctorId: doctor.doctor_id,
         patientRef: patientData.patient_id,
         patientName: patientData.patient_name,
         hospitalId,
@@ -296,11 +312,6 @@ export default function DashboardPage() {
       });
       setNotice('Prescription saved.');
     });
-
-  const handleSignOut = async () => {
-    await fetch('/api/auth/login', { method: 'DELETE', credentials: 'same-origin' });
-    router.push('/login');
-  };
 
   // ---- render helpers ----
 
@@ -357,11 +368,30 @@ export default function DashboardPage() {
                 <span className="text-xs text-red-600">{status.segmentCount} clips</span>
               </div>
             )}
-            <div className="text-sm text-gray-600">
-              {doctor.doctor_name || doctor.doctor_id}
-              <button onClick={handleSignOut} className="ml-3 text-blue-600 underline text-xs">
-                Sign out
-              </button>
+            {/* Who this consultation is recorded against. Locked once recording
+                starts: the doctor is written into the signed chain at open, and
+                changing it mid-session would make the file disagree with it. */}
+            <div className="flex items-center gap-2 text-sm text-gray-600">
+              <label htmlFor="doctor" className="text-gray-500">Doctor</label>
+              <select
+                id="doctor"
+                className="px-2 py-1 border border-gray-300 rounded-lg disabled:bg-gray-100 disabled:text-gray-500"
+                value={doctor.doctor_id}
+                disabled={status?.isRecording}
+                onChange={(e) => {
+                  const chosen = register.find((d) => d.doctor_id === e.target.value);
+                  if (chosen) {
+                    setDoctor(chosen);
+                    localStorage.setItem('aims_doctor_id', chosen.doctor_id);
+                  }
+                }}
+              >
+                {register.map((d) => (
+                  <option key={d.doctor_id} value={d.doctor_id}>
+                    {d.name} ({d.doctor_id})
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
         </div>
@@ -419,22 +449,15 @@ export default function DashboardPage() {
                 </div>
               </div>
 
-              {doctor.hospital_ids.length > 1 && !status?.isRecording && (
-                <div className="mt-6 pt-4 border-t">
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Consulting at
-                  </label>
-                  <select
-                    value={hospitalId}
-                    onChange={(e) => setHospitalId(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                  >
-                    {doctor.hospital_ids.map((id) => (
-                      <option key={id} value={id}>{id}</option>
-                    ))}
-                  </select>
+              {/* The agent refuses a grant whose hospital differs from the one
+                  its device was enrolled at, so this is shown rather than
+                  chosen. If it looks wrong, the machine is enrolled wrong. */}
+              <div className="mt-6 pt-4 border-t">
+                <div className="text-sm font-medium text-gray-700">Consulting at</div>
+                <div className="text-sm text-gray-600 mt-1">
+                  {status?.hospitalId || hospitalId}
                 </div>
-              )}
+              </div>
 
               {/* Consent - a precondition, not a formality */}
               {!status?.isRecording && (
