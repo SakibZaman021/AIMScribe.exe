@@ -121,7 +121,6 @@ def test_valid_grant_is_accepted(grant_keys):
     ({"aud": "someone-else"}, "wrong audience"),
     ({"iss": "attacker"}, "wrong issuer"),
     ({"consent_obtained": False}, "no consent"),
-    ({"hospital_id": ""}, "missing hospital"),
     ({"patient_ref": ""}, "missing patient"),
 ])
 def test_bad_grants_are_rejected(grant_keys, overrides, reason):
@@ -129,6 +128,32 @@ def test_bad_grants_are_rejected(grant_keys, overrides, reason):
     with pytest.raises(GrantError):
         verify_grant(_token(private_pem, **overrides), public,
                      issuer="cmed", audience="aimscribe-recorder")
+
+
+@pytest.mark.parametrize("overrides", [
+    {"hospital_id": ""},
+    {"sub": ""},
+    {"hospital_id": "", "sub": ""},
+])
+def test_grant_without_doctor_or_hospital_is_accepted(grant_keys, overrides):
+    """
+    CMED no longer knows either, so it must not be required to assert them.
+
+    The doctor and the hospital belong to the machine's enrolment. A grant that
+    omits them is normal; one that names them is not trusted on that basis
+    either - the controller compares both against the enrolment and raises an
+    integrity alert on a mismatch.
+
+    The patient is the one thing only CMED knows, so it stays mandatory.
+    """
+    private_pem, public = grant_keys
+    grant = verify_grant(_token(private_pem, **overrides), public,
+                         issuer="cmed", audience="aimscribe-recorder")
+    assert grant.patient_ref == "P12345"
+    if "hospital_id" in overrides:
+        assert grant.hospital_id == ""
+    if "sub" in overrides:
+        assert grant.doctor_id == ""
 
 
 def test_grant_signed_by_another_key_is_rejected(grant_keys):

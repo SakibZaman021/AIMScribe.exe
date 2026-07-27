@@ -583,15 +583,19 @@ def verify_grant(
     if not claims.get("consent_obtained"):
         raise GrantError("grant does not record patient consent")
 
-    for required in ("hospital_id", "patient_ref"):
-        if not claims.get(required):
-            raise GrantError(f"grant is missing {required}")
+    # The patient is the one thing only CMED knows, so it is the one thing the
+    # grant must carry. Doctor and hospital are deliberately allowed to be empty:
+    # they belong to the machine's enrolment, and CMED no longer knows them. A
+    # grant that does name them is not trusted either - the controller compares
+    # them against the enrolment and raises an integrity alert on a mismatch.
+    if not claims.get("patient_ref"):
+        raise GrantError("grant is missing patient_ref")
 
     return Grant(
         jti=str(claims["jti"]),
-        doctor_id=str(claims["sub"]),
+        doctor_id=str(claims.get("sub") or ""),
         doctor_name=str(claims.get("doctor_name", "")),
-        hospital_id=str(claims["hospital_id"]),
+        hospital_id=str(claims.get("hospital_id") or ""),
         patient_ref=str(claims["patient_ref"]),
         consent_obtained=True,
         consent_method=str(claims.get("consent_method", "")),
