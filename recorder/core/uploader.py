@@ -203,10 +203,27 @@ class UploadManager:
                     # on the next tick. This is the normal outage path.
                     continue
 
+            # Strictly in order, and stop at the first failure.
+            #
+            # The chain is sequential: every entry's prev_hash is the previous
+            # entry's hash, so a segment that arrives before its predecessor
+            # cannot verify and the backend quarantines the whole session. This
+            # loop used to discard the result and carry on to the next segment,
+            # so one failed upload - a dropped connection, a stale presigned URL
+            # - reordered everything after it and cost a real consultation.
+            #
+            # Leaving the rest pending is free: they are sealed on disk and the
+            # next tick retries from the one that failed.
             for segment in session.pending_segments():
                 if not self._running:
                     return
-                await self._send_segment(session, segment)
+                outcome = await self._send_segment(session, segment)
+                if not outcome.ok:
+                    logger.debug(
+                        "Segment %s of %s did not land; holding the rest of the "
+                        "session to preserve chain order",
+                        segment.seq_no, session.session_id)
+                    break
 
             # A session closed while the backend was unreachable still needs its
             # close delivered, or it would sit in 'open' forever and never be

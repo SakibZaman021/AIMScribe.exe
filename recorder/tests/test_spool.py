@@ -6,6 +6,7 @@ but only once the archive copy is proven to exist.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -314,3 +315,50 @@ def test_session_id_does_not_leak_patient_id(spool, device_key, audio_params):
     """Object keys are built from the session ID, which must carry no PHI."""
     session = _open(spool, device_key, audio_params, patient_ref="P12345")
     assert "P12345" not in session.session_id
+
+
+@pytest.mark.asyncio
+async def test_a_failed_segment_holds_back_the_rest(spool, device_key, audio_params):
+    """
+    Guards a bug that quarantined a real consultation.
+
+    The chain is sequential - every entry's prev_hash is the previous entry's
+    hash - so a segment arriving before its predecessor cannot verify, and the
+    backend quarantines the session. The drain loop used to discard the result
+    of each upload and continue, so one failed clip reordered everything after
+    it. Six clips went to storage as 2,3,4,5,6,1 and the session was lost.
+
+    Nothing is dropped: the remaining segments stay sealed on disk and the next
+    tick retries from the one that failed.
+    """
+    from core.uploader import UploadManager, UploadOutcome
+
+    session = _open(spool, device_key, audio_params)
+    for _ in range(4):
+        _seal(session)
+    session.mark_acknowledged()
+
+    cfg = SimpleNamespace(spool=SimpleNamespace(purge_grace_hours=24))
+    manager = UploadManager(cfg, device_key=device_key, spool=spool,
+                            receipt_public_key=None)
+    await manager.track(session)
+
+    attempted = []
+
+    async def flaky(sess, segment):
+        attempted.append(segment.seq_no)
+        ok = segment.seq_no != 2          # clip 2 cannot be delivered
+        if ok:
+            sess.set_state(segment.seq_no, COMMITTED)
+        return UploadOutcome(session_id=sess.session_id, seq_no=segment.seq_no, ok=ok)
+
+    manager._send_segment = flaky
+    manager._collect_receipts = lambda s: asyncio.sleep(0)
+    # _drain_once bails out immediately unless the manager is running.
+    manager._running = True
+
+    await manager._drain_once()
+
+    # Stops at the failure rather than delivering 3 and 4 ahead of 2.
+    assert attempted == [1, 2]
+    assert [s.seq_no for s in session.pending_segments()] == [2, 3, 4]
