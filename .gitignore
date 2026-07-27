@@ -50,3 +50,12 @@ recorder/build/
 spool/
 *.aimspl
 journal.jsonl
+
+# Editor and tooling state, per-machine
+.claude/
+.vscode/
+.idea/
+
+# Build markers and caches
+*.tsbuildinfo
+.deps_installed
