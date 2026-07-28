@@ -129,6 +129,19 @@ begin
                 'until this PC is enrolled. Continue anyway?',
                 mbConfirmation, MB_YESNO) = IDNO then
         Result := False;
+    end
+    else if Length(Trim(ConfigPage.Values[2])) < 20 then
+    begin
+      // A real token is 43 characters. Anything much shorter is a placeholder
+      // typed to get past this page, and the machine then installs cleanly,
+      // starts cleanly, and refuses to record - which is discovered by a doctor
+      // with a patient in front of them rather than by the person installing it.
+      MsgBox('That does not look like an enrolment token.' + #13#10 + #13#10 +
+             'A token is about 43 characters, issued by the AIMScribe ' +
+             'administrator for this specific PC. Leave the field empty if you ' +
+             'intend to enrol this machine later.',
+             mbError, MB_OK);
+      Result := False;
     end;
   end;
 end;
