@@ -216,10 +216,15 @@ def resume_payload(*, at: datetime, paused_seconds: float) -> Dict[str, Any]:
 
 
 def close_payload(
-    *, closed_at: datetime, segment_count: int, duration_seconds: float, paused_seconds: float
+    *, closed_at: datetime, segment_count: int, duration_seconds: float,
+    paused_seconds: float, reason: str = "",
 ) -> Dict[str, Any]:
     return {
         "type": "close",
+        # Why the recording ended, signed with the rest. A consultation stopped
+        # from the tray icon rather than from CMED is worth knowing about, and a
+        # reason that lives only in a local log is not evidence of anything.
+        "reason": reason,
         "closed_at": iso_utc(closed_at),
         "segment_count": segment_count,
         "duration_seconds": round(float(duration_seconds), 3),

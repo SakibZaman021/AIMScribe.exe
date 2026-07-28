@@ -23,6 +23,7 @@ import axios from 'axios';
 import {
   AimscribeClient,
   AgentStatus,
+  DoctorRegister,
   PAUSE_REASONS,
 } from '@/lib/aimscribe-client';
 
@@ -70,6 +71,11 @@ export default function DashboardPage() {
   const [busy, setBusy] = useState(false);
 
   const [consentGiven, setConsentGiven] = useState(false);
+  // The consulting room is fixed, the doctor in it is not. The register comes
+  // from the agent; the choice is remembered for the session so a doctor seeing
+  // twenty patients picks their name once, not twenty times.
+  const [register, setRegister] = useState<DoctorRegister | null>(null);
+  const [doctorId, setDoctorId] = useState('');
   const [showPause, setShowPause] = useState(false);
   // Explicitly widened: PAUSE_REASONS is `as const`, so inference would pin this
   // to the first literal and reject every other reason.
@@ -118,7 +124,24 @@ export default function DashboardPage() {
     const unsubscribe = [
       client.on('connection', ({ connected }: { connected: boolean }) => {
         setConnected(connected);
-        if (connected) setError(null);
+        if (connected) {
+          setError(null);
+          // Ask on every connect, not once: a doctor added this morning should
+          // appear without anyone restarting anything.
+          client
+            .doctors()
+            .then((next) => {
+              setRegister(next);
+              // Pre-select the room's usual doctor, so the common case stays one
+              // click - and never overwrite a choice already made.
+              setDoctorId((current) => {
+                if (current && next.doctors.some((d) => d.doctorId === current)) return current;
+                const assigned = next.assignedDoctorId ?? '';
+                return next.doctors.some((d) => d.doctorId === assigned) ? assigned : '';
+              });
+            })
+            .catch(() => setRegister({ hospitalId: null, assignedDoctorId: null, doctors: [] }));
+        }
       }),
       client.on('status', (next: AgentStatus) => setStatus(next)),
       client.on('recording_started', () => {
@@ -135,8 +158,20 @@ export default function DashboardPage() {
         setNotice('Recording resumed.');
         client.refreshStatus();
       }),
-      client.on('recording_stopped', () => {
-        setNotice('Recording stopped and queued for upload.');
+      client.on('recording_stopped', (message: any) => {
+        // A recording can be stopped from the agent's tray icon, or cut short
+        // because the next patient was started. Saying so here is the only way
+        // the person in front of the screen finds out - otherwise a consultation
+        // ends mid-sentence and the page reports a tidy success.
+        const reason = String(message?.reason ?? '');
+        if (reason && reason !== 'doctor_stopped') {
+          setNotice(
+            `Recording stopped from outside CMED (${reason.replace(/_/g, ' ')}). ` +
+              'The audio so far is saved and queued for upload.'
+          );
+        } else {
+          setNotice('Recording stopped and queued for upload.');
+        }
         client.refreshStatus();
       }),
       client.on('segment_sealed', () => client.refreshStatus()),
@@ -250,9 +285,13 @@ export default function DashboardPage() {
       if (!consentGiven) {
         throw new Error('Confirm the patient has agreed to be recorded before starting.');
       }
+      if (!doctorId) {
+        throw new Error('Choose which doctor is seeing this patient.');
+      }
       await clientRef.current!.start({
         patientRef: patientData.patient_id,
         patientName: patientData.patient_name,
+        doctorId,
         consentObtained: true,
         consentMethod: 'verbal_at_reception',
       });
@@ -548,18 +587,48 @@ export default function DashboardPage() {
                 </div>
               </div>
 
-              {/* The agent refuses a grant whose hospital differs from the one
-                  its device was enrolled at, so this is shown rather than
-                  chosen. If it looks wrong, the machine is enrolled wrong. */}
+              {/* The hospital is shown, not chosen: it comes from the machine's
+                  enrolment, and a PC does not move between hospitals. The doctor
+                  is chosen, because the room is shared - but only from the
+                  register, and the backend checks the choice again when the
+                  session opens. */}
               <div className="mt-6 pt-4 border-t">
                 <div className="text-sm font-medium text-gray-700">Consulting at</div>
                 <div className="text-sm text-gray-600 mt-1">
                   {!status
                     ? 'waiting for AIMScribe on this PC…'
-                    : status.hospitalId
-                      ? `${status.hospitalId}${status.doctorId ? ` · ${status.doctorId}` : ''}`
-                      : 'this PC is not enrolled — contact IT'}
+                    : status.hospitalId || 'this PC is not enrolled — contact IT'}
                 </div>
+
+                {!status?.isRecording && (
+                  <div className="mt-3">
+                    <label className="text-sm font-medium text-gray-700">
+                      Doctor seeing this patient
+                    </label>
+                    {register && register.doctors.length > 0 ? (
+                      <select
+                        value={doctorId}
+                        onChange={(e) => setDoctorId(e.target.value)}
+                        className="mt-1 w-full border rounded-lg px-3 py-2 text-sm text-gray-800"
+                      >
+                        <option value="">Choose a doctor…</option>
+                        {register.doctors.map((d) => (
+                          <option key={d.doctorId} value={d.doctorId}>
+                            {d.fullName === d.doctorId ? d.doctorId : `${d.fullName} (${d.doctorId})`}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <div className="mt-1 text-sm text-gray-500">
+                        {!connected
+                          ? 'waiting for AIMScribe on this PC…'
+                          : register
+                            ? 'No doctors are registered at this hospital yet — contact IT.'
+                            : 'loading…'}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Consent - a precondition, not a formality */}
@@ -584,9 +653,9 @@ export default function DashboardPage() {
                   <>
                     <button
                       onClick={handleStart}
-                      disabled={!connected || busy || !consentGiven}
+                      disabled={!connected || busy || !consentGiven || !doctorId}
                       className={`w-full py-3 rounded-lg font-semibold transition-colors ${
-                        !connected || !consentGiven
+                        !connected || !consentGiven || !doctorId
                           ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
                           : recordingOtherPatient
                           ? 'bg-orange-500 text-white hover:bg-orange-600'
@@ -594,6 +663,7 @@ export default function DashboardPage() {
                       }`}
                     >
                       {!connected ? 'Waiting for AIMScribe…'
+                        : !doctorId ? 'Choose the doctor to continue'
                         : !consentGiven ? 'Confirm consent to continue'
                         : recordingOtherPatient ? 'Start (stops previous patient)'
                         : 'Start Consultation'}

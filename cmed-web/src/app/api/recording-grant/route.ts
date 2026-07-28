@@ -4,10 +4,15 @@
  * Issues the signed authorisation the AIMScribe agent needs before it will record.
  * The agent will not start without one, and only this route can produce one.
  *
- * There is no doctor login and the browser never names a doctor. Identity
- * belongs to the machine: an administrator enrols each PC to one doctor at one
- * hospital, and the agent takes both from that enrolment. The page chooses the
- * patient and nothing else.
+ * There is no doctor login. The hospital belongs to the machine - an
+ * administrator enrols each PC to one, and a PC does not move between hospitals.
+ *
+ * The doctor does not belong to the machine. A consulting room is shared and the
+ * rota changes, so the page names the doctor for each consultation, chosen from
+ * the register the agent supplies. That name is not trusted here: the backend
+ * checks it against the hospital's register when the session opens and refuses a
+ * doctor who is not credentialed to record there. Free text never reaches the
+ * archive.
  *
  * This route still matters, because the agent refuses to record without a grant
  * - so a random page the doctor visits cannot start a recording, even though
@@ -26,6 +31,7 @@ export const dynamic = 'force-dynamic';
 
 interface GrantRequestBody {
   patient_ref?: string;
+  doctor_id?: string;
   hospital_id?: string;
   consent_obtained?: boolean;
   consent_method?: string;
@@ -47,8 +53,14 @@ export async function POST(request: NextRequest) {
   }
 
   let patientRef: string;
+  let doctorId = '';
   try {
     patientRef = assertSafeIdentifier(String(body.patient_ref ?? ''), 'patient_ref');
+    // Optional: a PC with one regular doctor need not name one, and the agent
+    // falls back to its enrolment.
+    if (body.doctor_id) {
+      doctorId = assertSafeIdentifier(String(body.doctor_id), 'doctor_id');
+    }
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Invalid identifier.' },
@@ -57,11 +69,10 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    // Doctor and hospital are left empty on purpose: this server does not know
-    // them and must not guess. The agent fills both from its enrolment, and
-    // flags a grant that disagrees.
+    // The hospital is left empty on purpose: this server does not know it and
+    // must not guess. The agent fills it from its enrolment.
     const { grant, expiresIn } = await mintGrant({
-      doctorId: '',
+      doctorId,
       doctorName: '',
       hospitalId: '',
       patientRef,

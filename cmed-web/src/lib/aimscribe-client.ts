@@ -43,6 +43,17 @@ export interface AgentStatus {
   };
 }
 
+export interface DoctorOption {
+  doctorId: string;
+  fullName: string;
+}
+
+export interface DoctorRegister {
+  hospitalId: string | null;
+  assignedDoctorId: string | null;
+  doctors: DoctorOption[];
+}
+
 export interface PauseRequest {
   reason: string;
   reasonDetail?: string;
@@ -138,7 +149,7 @@ export class AimscribeClient {
   async start(options: {
     patientRef: string;
     patientName?: string;
-    hospitalId?: string;
+    doctorId?: string;
     consentObtained: boolean;
     consentMethod?: string;
   }): Promise<any> {
@@ -151,6 +162,7 @@ export class AimscribeClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         patient_ref: options.patientRef,
+        doctor_id: options.doctorId ?? '',
         consent_obtained: options.consentObtained,
         consent_method: options.consentMethod ?? 'verbal_at_reception',
       }),
@@ -165,6 +177,27 @@ export class AimscribeClient {
       grant: data.grant,
       session: { patient_name: options.patientName ?? '' },
     });
+  }
+
+  /**
+   * The doctors credentialed to record at this PC's hospital.
+   *
+   * Asked of the agent rather than fetched here: the agent holds the device
+   * token, and it knows which hospital this machine belongs to. The browser
+   * only picks from what comes back.
+   */
+  async doctors(): Promise<DoctorRegister> {
+    const data = await this.command('doctors', {});
+    return {
+      hospitalId: data?.hospital_id ?? null,
+      assignedDoctorId: data?.assigned_doctor_id ?? null,
+      doctors: Array.isArray(data?.doctors)
+        ? data.doctors.map((d: any) => ({
+            doctorId: String(d.doctor_id ?? ''),
+            fullName: String(d.full_name ?? d.doctor_id ?? ''),
+          }))
+        : [],
+    };
   }
 
   async pause(request: PauseRequest): Promise<any> {

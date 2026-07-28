@@ -13,7 +13,8 @@ States:
 
 Rules enforced here rather than trusted from the caller:
 
-* Identity comes from a verified CMED grant, never from the browser payload.
+* The hospital comes from the device enrolment; the doctor comes from a
+  verified CMED grant and is checked against the backend's register.
 * A session cannot open without recorded patient consent.
 * Pause requires a reason from a fixed list, and a supervisor's name once the
   expected duration passes the configured threshold.
@@ -66,6 +67,10 @@ class ActiveSession:
     recorder: AudioRecorder
     segmenter: Segmenter
     opened_at: datetime
+    # Who is consulting. Usually the machine's own doctor, but a shared
+    # consulting room rotates, so CMED may name someone else for this
+    # consultation - the backend has already checked they are credentialed here.
+    doctor_id: str = ""
     audio_seconds: float = 0.0
     paused_seconds: float = 0.0
     pause: Optional[PauseRecord] = None
@@ -108,8 +113,9 @@ class SessionController:
         # this machine is not enrolled and must not record.
         self.device_id: str = ""
         self.hospital_id: str = ""
-        # Bound at enrolment by an administrator. Never read from a grant,
-        # a page, or anything else the doctor's browser can influence.
+        # The machine's usual doctor, from the enrolment. Only a default now:
+        # a consulting room is shared, so CMED names the doctor per consultation
+        # and the backend checks that name against the hospital's register.
         self.doctor_id: str = ""
         self.last_alert: str = ""
 
@@ -149,7 +155,8 @@ class SessionController:
                     at=datetime.now(timezone.utc),
                 ))
                 total = sum(s.duration_seconds for s in session.segments.values())
-                session.close(duration_seconds=total, paused_seconds=0.0)
+                session.close(duration_seconds=total, paused_seconds=0.0,
+                              reason="recovered_after_unclean_shutdown")
                 self._emit("integrity_alert", {
                     "session_id": session.session_id,
                     "alert_type": "unexpected_agent_exit",
@@ -174,20 +181,21 @@ class SessionController:
                     "This PC is not enrolled with the AIMS LAB server. Contact IT - "
                     "recordings cannot be attributed or archived until it is.")
 
-            if not self.doctor_id:
-                raise SessionError(
-                    "This PC is enrolled but no doctor is assigned to it. Contact IT - "
-                    "a recording nobody can attribute is worse than one that did "
-                    "not start.")
-
-            # Identity comes from the enrolment, not the browser. An
-            # administrator bound this machine to a doctor and a hospital; the
-            # page can choose the patient and nothing else.
+            # The hospital comes from the enrolment: a PC does not move between
+            # hospitals, so the page has no business asserting one.
             #
-            # A grant that disagrees is still recorded and still archived - the
-            # audio matters more than the argument - but it is flagged, because
-            # the only innocent explanation is a machine handed to a different
-            # doctor without being re-enrolled.
+            # The doctor does move. A consulting room is shared, and rotas change,
+            # so CMED names the doctor for each consultation and the machine's own
+            # doctor is only the default. That name is not trusted here - the
+            # backend checks it against the hospital's register at open, and
+            # refuses a doctor who is not credentialed to record there.
+            doctor_id = grant.doctor_id or self.doctor_id
+            if not doctor_id:
+                raise SessionError(
+                    "No doctor is assigned to this recording. Sign in to CMED, or "
+                    "ask IT to assign a doctor to this PC - a recording nobody can "
+                    "attribute is worse than one that did not start.")
+
             if grant.hospital_id and grant.hospital_id != self.hospital_id:
                 self._emit("integrity_alert", {
                     "session_id": None,
@@ -195,13 +203,11 @@ class SessionController:
                     "detail": (f"device enrolled at {self.hospital_id}, "
                                f"grant asserts {grant.hospital_id}"),
                 })
-            if grant.doctor_id and grant.doctor_id != self.doctor_id:
-                self._emit("integrity_alert", {
-                    "session_id": None,
-                    "alert_type": "doctor_mismatch",
-                    "detail": (f"device enrolled to {self.doctor_id}, "
-                               f"grant asserts {grant.doctor_id}"),
-                })
+            if self.doctor_id and doctor_id != self.doctor_id:
+                # Not an error - this is the rota working. Logged so a room whose
+                # regular doctor never records can be spotted and re-assigned.
+                logger.info("Session opening for %s on a PC assigned to %s",
+                            self._pseudonym(doctor_id), self._pseudonym(self.doctor_id))
 
             if self._active is not None:
                 # A doctor opening a different patient means the previous
@@ -218,9 +224,7 @@ class SessionController:
             spool_session = self._spool.open_session(
                 device_key=self._device_key,
                 device_id=self.device_id,
-                # From the enrolment, so the chain records who the machine
-                # belongs to rather than who the page said.
-                doctor_id=self.doctor_id,
+                doctor_id=doctor_id,
                 hospital_id=self.hospital_id,
                 patient_ref=grant.patient_ref,
                 consent_method=grant.consent_method,
@@ -274,6 +278,7 @@ class SessionController:
                 recorder=recorder,
                 segmenter=segmenter,
                 opened_at=opened_at,
+                doctor_id=doctor_id,
             )
             self.state = RECORDING
 
@@ -283,7 +288,7 @@ class SessionController:
             logger.info("Session %s opened for patient %s by doctor %s at %s",
                         spool_session.session_id,
                         self._pseudonym(grant.patient_ref),
-                        self._pseudonym(self.doctor_id),
+                        self._pseudonym(doctor_id),
                         self.hospital_id)
 
             result = {
@@ -296,7 +301,7 @@ class SessionController:
             self._emit("recording_started", {
                 "session_id": spool_session.session_id,
                 "patient_ref": grant.patient_ref,
-                "doctor_id": self.doctor_id,
+                "doctor_id": doctor_id,
                 "hospital_id": self.hospital_id,
             })
             return result
@@ -347,14 +352,14 @@ class SessionController:
             entry = active.spool.append_chain_entry("pause", crypto.pause_payload(
                 reason=reason,
                 reason_detail=reason_detail,
-                authorised_by=authorised_by or self.doctor_id,
+                authorised_by=authorised_by or active.doctor_id or self.doctor_id,
                 supervisor_required=supervisor_required,
                 at=now,
             ))
             active.pause = PauseRecord(
                 reason=reason,
                 reason_detail=reason_detail,
-                authorised_by=authorised_by or self.doctor_id,
+                authorised_by=authorised_by or active.doctor_id or self.doctor_id,
                 supervisor_required=supervisor_required,
                 started_at=now,
                 started_monotonic=time.monotonic(),
@@ -468,6 +473,7 @@ class SessionController:
         close_entry = active.spool.close(
             duration_seconds=active.audio_seconds,
             paused_seconds=active.paused_seconds,
+            reason=reason,
         )
         verdict = active.spool.verify_chain()
         if not verdict.ok:
@@ -676,7 +682,7 @@ class SessionController:
             "patient_name": active.patient_name if active else None,
             # Reported even with no session running, so the dashboard can
             # show who this machine is enrolled to before recording starts.
-            "doctor_id": self.doctor_id or None,
+            "doctor_id": (active.doctor_id if active else "") or self.doctor_id or None,
             "hospital_id": self.hospital_id or None,
             "started_at": crypto.iso_utc(active.opened_at) if active else None,
             "segment_count": len(active.spool.segments) if active else 0,

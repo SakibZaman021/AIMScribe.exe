@@ -5,10 +5,15 @@
  * doctor may record a named patient at a named hospital. The AIMScribe agent
  * verifies it against a pinned public key before it will touch the microphone.
  *
- * This is the hinge of the whole security model. Previously the browser told the
- * recorder its own doctor_id and hospital_id, so any web page the doctor visited
- * could start a recording, and a typo could file a consultation under the wrong
- * hospital. Now those values come from the server session and are signed.
+ * This is the hinge of the whole security model. Previously any web page the
+ * doctor visited could start a recording, and free text could file a
+ * consultation under a hospital or a doctor that did not exist.
+ *
+ * Now the hospital comes from the machine's enrolment and never from here. The
+ * doctor is named by the page - a consulting room is shared, so it has to be -
+ * but only from the hospital's register, and the backend checks the name again
+ * before the session opens. A signed grant is still required, so a stray page
+ * cannot record at all.
  *
  * The private key lives only in this server's environment. It never reaches the
  * browser, and the agent only ever holds the public half.

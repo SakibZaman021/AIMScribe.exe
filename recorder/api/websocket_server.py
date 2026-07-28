@@ -73,11 +73,19 @@ class WebSocketManager:
         self._connections: Set[WebSocket] = set()
         self._lock = asyncio.Lock()
         self._grant_key = None
+        self._uploader = None
+        self._hospital_id = ""
 
     # ---- wiring ----
 
     def set_controller(self, controller) -> None:
         self._controller = controller
+
+    def set_register_source(self, uploader, hospital_id: str) -> None:
+        """Where the doctor list comes from: the backend, via the uploader's
+        device-authenticated client, for this machine's hospital."""
+        self._uploader = uploader
+        self._hospital_id = hospital_id or ""
 
     def set_grant_key(self, key) -> None:
         self._grant_key = key
@@ -146,6 +154,7 @@ class WebSocketManager:
             "pause": self._pause,
             "resume": self._resume,
             "status": self._status,
+            "doctors": self._doctors,
         }
         handler = handlers.get(command)
         if handler is None:
@@ -224,6 +233,28 @@ class WebSocketManager:
 
     async def _status(self, message: Dict[str, Any]) -> Dict[str, Any]:
         return self._status_event()
+
+    async def _doctors(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Who may record on this PC, for the page's doctor selector.
+
+        The consulting room is shared and the doctor changes, so the page has to
+        name one - but it names it from this list, not from free text, and the
+        backend checks the choice again when the session opens. The list is
+        fetched by the agent because the device token that authorises the
+        request must not reach a browser.
+        """
+        register = None
+        if self._uploader is not None and self._hospital_id:
+            register = await self._uploader.fetch_doctors(self._hospital_id)
+        return self._ack("doctors", {
+            "hospital_id": self._hospital_id or None,
+            # The machine's usual doctor, pre-selected so the common case stays
+            # one click.
+            "assigned_doctor_id": (
+                self._controller.doctor_id if self._controller else "") or None,
+            "doctors": register or [],
+        })
 
     # ---- outbound ----
 

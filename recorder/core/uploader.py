@@ -97,6 +97,7 @@ class UploadManager:
         # Bearer credential issued at enrollment. Render terminates TLS itself and
         # offers no client certificates, so this is the transport identity.
         self._device_token: Optional[str] = None
+        self._doctors_cache: Optional[List[Dict[str, Any]]] = None
 
         self._sessions: List[SessionSpool] = []
         self._http: Optional[aiohttp.ClientSession] = None
@@ -388,6 +389,7 @@ class UploadManager:
         result = await self._post("/session/close", {
             "session_id": session.session_id,
             "closed_at": crypto.iso_utc(session.closed_at) if session.closed_at else None,
+            "close_reason": session.close_reason,
             "duration_seconds": duration_seconds,
             "paused_seconds": paused_seconds,
             "segment_count": len(session.segments),
@@ -493,6 +495,24 @@ class UploadManager:
                 self._emit("segment_purged", {
                     "session_id": session.session_id, "seq_no": segment.seq_no,
                 })
+
+    # ---- doctor register ----
+
+    async def fetch_doctors(self, hospital_id: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        The doctors credentialed to record at this hospital, for the CMED selector.
+
+        Cached, and the cache is kept when the backend is unreachable: a shared
+        consulting room offline for an afternoon still needs to name its doctor,
+        and a stale list of colleagues is better than an empty one. One attempt
+        only - the page is waiting, and there is a cache to fall back on.
+        """
+        if not hospital_id:
+            return None
+        body = await self._get(f"/doctors?hospital_id={hospital_id}", attempts=1)
+        if body is not None and isinstance(body.get("doctors"), list):
+            self._doctors_cache = body["doctors"]
+        return self._doctors_cache
 
     # ---- HTTP ----
 

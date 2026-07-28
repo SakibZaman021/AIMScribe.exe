@@ -158,6 +158,7 @@ class Runtime:
 
         await self.controller.start()
         self.ws.set_controller(self.controller)
+        self.ws.set_register_source(self.uploader, self.controller.hospital_id)
 
         logger.info("Agent ready - %s at %s, device %s (%s), spool holds %.1f h",
                     self.identity.doctor_id if self.identity else "NO DOCTOR",
@@ -166,9 +167,10 @@ class Runtime:
                     self.device_key.fingerprint(), self.cfg.spool_seconds() / 3600)
 
         if self.identity is not None and not self.identity.doctor_id:
-            logger.critical(
-                "This device is enrolled but no doctor is assigned to it. Recording "
-                "will refuse to start. Re-enrol with a token minted for a doctor.")
+            logger.warning(
+                "No doctor is assigned to this PC. Recording still works - CMED "
+                "names the doctor for each consultation - but a consultation "
+                "started without one will be refused.")
         for problem in self.problems:
             logger.critical("CONFIGURATION PROBLEM: %s", problem)
         for warning in self.warnings:
@@ -312,6 +314,28 @@ def create_app(runtime: Runtime) -> FastAPI:
     @app.get("/api/v1/session/status")
     async def session_status(_: None = Depends(require_api_key)):
         return {"success": True, "data": controller().status()}
+
+    @app.get("/api/v1/doctors")
+    async def doctors(_: None = Depends(require_api_key)):
+        """
+        Who may record on this PC today.
+
+        A consulting room is shared, so the page asks the agent rather than
+        assuming the machine's own doctor. The list is fetched here, not by the
+        browser, because the device token that authorises it must stay on this
+        machine - and because the agent knows which hospital it belongs to,
+        while the browser only knows what it was told.
+        """
+        assigned = runtime.identity.doctor_id if runtime.identity else ""
+        hospital = runtime.identity.hospital_id if runtime.identity else ""
+        register = await runtime.uploader.fetch_doctors(hospital) if runtime.uploader else None
+        return {"success": True, "data": {
+            "hospital_id": hospital or None,
+            # The machine's usual doctor, pre-selected so the common case is
+            # still one click.
+            "assigned_doctor_id": assigned or None,
+            "doctors": register or [],
+        }}
 
     @app.post("/api/v1/session/stop")
     async def session_stop(_: None = Depends(require_api_key)):

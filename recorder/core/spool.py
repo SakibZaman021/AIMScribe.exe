@@ -164,6 +164,7 @@ class SessionSpool:
         self.close_reported = False
         self.duration_seconds = 0.0
         self.paused_seconds = 0.0
+        self.close_reason = ""
 
         self._journal_path = directory / JOURNAL_NAME
 
@@ -295,6 +296,9 @@ class SessionSpool:
                     spool.closed_at = _parse_iso(record.get("at"))
                     spool.duration_seconds = record.get("duration_seconds", 0.0)
                     spool.paused_seconds = record.get("paused_seconds", 0.0)
+                    # Survives a crash, so a session closed from the tray and
+                    # reported after a restart still reports why.
+                    spool.close_reason = record.get("reason", "")
                 elif kind == "close_reported":
                     spool.close_reported = True
 
@@ -480,20 +484,24 @@ class SessionSpool:
                 self.server_acknowledged = True
                 self._append_journal({"rec": "acknowledged", "at": time.time()})
 
-    def close(self, *, duration_seconds: float, paused_seconds: float) -> ChainEntry:
+    def close(self, *, duration_seconds: float, paused_seconds: float,
+              reason: str = "") -> ChainEntry:
         with self._lock:
             self.closed_at = datetime.now(timezone.utc)
             self.duration_seconds = duration_seconds
             self.paused_seconds = paused_seconds
+            self.close_reason = reason
             entry = self.append_chain_entry("close", crypto.close_payload(
                 closed_at=self.closed_at,
                 segment_count=len(self.segments),
                 duration_seconds=duration_seconds,
                 paused_seconds=paused_seconds,
+                reason=reason,
             ))
             self._append_journal({
                 "rec": "closed",
                 "at": crypto.iso_utc(self.closed_at),
+                "reason": reason,
                 "duration_seconds": round(duration_seconds, 3),
                 "paused_seconds": round(paused_seconds, 3),
             })
