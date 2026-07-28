@@ -448,8 +448,18 @@ export default function DashboardPage() {
                   </>
                 )}
 
-                {recordingThisPatient && !status?.isPaused && (
+                {/* Shown for any recording in progress, not only one started
+                    from this tab. patientData lives in sessionStorage, which is
+                    per tab, so gating on it meant a reload or a second tab hid
+                    Pause and Stop while audio was still being captured - a
+                    recording you can see but cannot stop. */}
+                {status?.isRecording && !status?.isPaused && (
                   <>
+                    {recordingOtherPatient && (
+                      <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
+                        Recording patient {status.patientRef}, not the one shown here.
+                      </p>
+                    )}
                     <button
                       onClick={() => setShowPause(true)}
                       disabled={busy}
