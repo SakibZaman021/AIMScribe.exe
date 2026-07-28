@@ -82,6 +82,16 @@ class Runtime:
         self.warnings = cfg.production_warnings()
         self._loop = None
 
+    @property
+    def loop(self):
+        """
+        The agent's event loop, for callers on another thread.
+
+        The tray runs on its own thread and must not touch the controller
+        directly; it schedules onto this instead.
+        """
+        return self._loop
+
     # ---- lifecycle ----
 
     async def startup(self) -> None:

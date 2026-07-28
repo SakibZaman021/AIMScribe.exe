@@ -225,10 +225,18 @@ class AgentTray:
             MenuItem("Open log folder", self.on_open_logs),
             MenuItem("Copy diagnostics", self.on_copy_diagnostics),
             Menu.SEPARATOR,
-            # Pause is deliberately not here: it requires a reason and, past the
-            # threshold, a supervisor's name. Both belong in CMED where the doctor
-            # is already identified, and where the reason is captured as text.
-            MenuItem("Pause is available in CMED", None, enabled=False),
+            # Recording control lives here as well as in CMED. A pause still
+            # carries a reason - chosen from the same fixed list, so the gap in
+            # the audio is explained either way - but it no longer depends on a
+            # browser being able to reach the agent. A consultation once ran for
+            # an hour with no way to stop it because the page had lost its
+            # patient, which is not a state a clinical recorder should allow.
+            MenuItem("Pause recording", Menu(*self._pause_items(MenuItem)),
+                     enabled=lambda _: self._is_recording() and not self._is_paused()),
+            MenuItem("Resume recording", self.on_resume,
+                     enabled=lambda _: self._is_paused()),
+            MenuItem("Stop recording", self.on_stop,
+                     enabled=lambda _: self._is_recording()),
             Menu.SEPARATOR,
             MenuItem(
                 "Exit (administrator only)" if not is_administrator() else "Exit",
@@ -236,6 +244,85 @@ class AgentTray:
                 enabled=lambda _: is_administrator(),
             ),
         )
+
+    # ---- recording control ----
+
+    def _is_recording(self) -> bool:
+        return bool(self._status().get("is_recording"))
+
+    def _is_paused(self) -> bool:
+        return bool(self._status().get("is_paused"))
+
+    def _pause_items(self, MenuItem):
+        """
+        One entry per configured pause reason.
+
+        A menu cannot ask for free text, so "other" is offered with a fixed
+        note rather than being left blank: an unexplained gap is worse than a
+        vaguely explained one, and CMED remains available for a fuller reason.
+        """
+        return [
+            MenuItem(reason.replace("_", " ").capitalize(),
+                     self._pause_action(reason))
+            for reason in config.pause.reasons
+        ]
+
+    def _pause_action(self, reason: str):
+        def action(icon, item):
+            detail = ("paused from the tray" if reason != "other"
+                      else "paused from the tray; no reason given")
+            self._call(
+                lambda controller: controller.pause_session(
+                    reason=reason, reason_detail=detail,
+                    authorised_by="", expected_seconds=0),
+                f"Paused: {reason.replace('_', ' ')}",
+                "Could not pause")
+        return action
+
+    def on_resume(self, icon, item):
+        self._call(lambda controller: controller.resume_session(),
+                   "Recording resumed", "Could not resume")
+
+    def on_stop(self, icon, item):
+        self._call(lambda controller: controller.stop_session(reason="stopped_from_tray"),
+                   "Recording stopped and queued for upload", "Could not stop")
+
+    def _call(self, make_coro, success: str, failure: str) -> None:
+        """
+        Run a controller coroutine from the tray thread.
+
+        pystray callbacks run on their own thread, so the coroutine is scheduled
+        onto the agent's loop rather than awaited here. The result is reported as
+        a notification because a menu click that appears to do nothing is worse
+        than one that says why it failed.
+        """
+        import asyncio
+
+        controller = self.runtime.controller
+        loop = self.runtime.loop
+        if controller is None or loop is None:
+            self.notify("AIMScribe", "The agent is still starting.")
+            return
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(make_coro(controller), loop)
+            result = future.result(timeout=30)
+        except Exception as exc:
+            logger.error("%s: %s", failure, exc)
+            self.notify(failure, str(exc)[:180])
+            return
+
+        if isinstance(result, dict) and result.get("status") == "not_recording":
+            self.notify("AIMScribe", "Nothing is recording.")
+            return
+        self.notify("AIMScribe", success)
+        # The refresh thread repaints within two seconds, but a menu that still
+        # says "Recording" straight after Stop invites a second click.
+        if self.icon is not None:
+            try:
+                self.icon.update_menu()
+            except Exception:
+                pass
 
     # ---- actions ----
 
