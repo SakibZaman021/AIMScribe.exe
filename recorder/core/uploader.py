@@ -267,7 +267,12 @@ class UploadManager:
             "device_pubkey": self._device_key.public_bytes_raw().hex(),
             "genesis": genesis.to_wire(),
         }
-        result = await self._post("/session/open", payload)
+        # attempts=1: the drain loop is itself the retry, every 10 seconds.
+        # Retrying in here for the full backoff - 2+8+30+120+600, nearly
+        # 13 minutes - blocks every other session behind this one, because
+        # _drain_once works through them sequentially. One failing clip
+        # stopped three later consultations from registering at all.
+        result = await self._post("/session/open", payload, attempts=1)
         if result is None:
             return False
         logger.info("Session %s registered with the backend", session.session_id)
@@ -291,12 +296,17 @@ class UploadManager:
             })
             return UploadOutcome(session.session_id, seq_no, False, error=str(exc))
 
+        # attempts=1: the drain loop is itself the retry, every 10 seconds.
+        # Retrying in here for the full backoff - 2+8+30+120+600, nearly
+        # 13 minutes - blocks every other session behind this one, because
+        # _drain_once works through them sequentially. One failing clip
+        # stopped three later consultations from registering at all.
         authorization = await self._post("/segment/authorize", {
             "session_id": session.session_id,
             "seq_no": seq_no,
             "bytes": segment.byte_length,
             "sha256": segment.sha256.hex(),
-        })
+        }, attempts=1)
         if not authorization:
             segment.last_error = "authorize failed"
             return UploadOutcome(session.session_id, seq_no, False, error=segment.last_error)
@@ -325,7 +335,7 @@ class UploadManager:
             "rms_mean": segment.rms_mean,
             "is_final": segment.is_final,
             "chain_entry": chain_entry.to_wire() if chain_entry else None,
-        })
+        }, attempts=1)
         if not commit:
             segment.last_error = "commit failed"
             return UploadOutcome(session.session_id, seq_no, False, error=segment.last_error)
@@ -384,7 +394,7 @@ class UploadManager:
             "chain_head": session.head_hash.hex() if session.head_hash else None,
             "chain_entry": close_entry.to_wire() if close_entry else None,
             "manifest": session.manifest(),
-        })
+        }, attempts=1)
         if result is None:
             return False
 

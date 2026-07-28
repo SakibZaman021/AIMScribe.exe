@@ -362,3 +362,53 @@ async def test_a_failed_segment_holds_back_the_rest(spool, device_key, audio_par
     # Stops at the failure rather than delivering 3 and 4 ahead of 2.
     assert attempted == [1, 2]
     assert [s.seq_no for s in session.pending_segments()] == [2, 3, 4]
+
+
+@pytest.mark.asyncio
+async def test_one_failing_session_does_not_block_the_others(spool, device_key, audio_params):
+    """
+    Guards a stall that hid three consultations.
+
+    A 500 from the backend is a 5xx, so it was retried with the full backoff -
+    2+8+30+120+600, nearly 13 minutes - inside _drain_once, which works through
+    sessions sequentially. One failing clip therefore blocked every session
+    behind it, including /session/open for newly started recordings: they never
+    appeared in the database or in storage, and nothing in the agent said why.
+
+    The drain loop runs every 10 seconds and is itself the retry, so a failure
+    must cost this session its turn and nothing more.
+    """
+    from core.uploader import UploadManager, UploadOutcome
+
+    stuck = _open(spool, device_key, audio_params, patient_ref="STUCK")
+    _seal(stuck)
+    stuck.mark_acknowledged()
+
+    later = _open(spool, device_key, audio_params, patient_ref="LATER")
+    _seal(later)
+
+    cfg = SimpleNamespace(spool=SimpleNamespace(purge_grace_hours=24))
+    manager = UploadManager(cfg, device_key=device_key, spool=spool,
+                            receipt_public_key=None)
+    await manager.track(stuck)
+    await manager.track(later)
+    manager._running = True
+
+    opened = []
+
+    async def failing_send(sess, segment):
+        return UploadOutcome(session_id=sess.session_id, seq_no=segment.seq_no,
+                             ok=False, error="500")
+
+    async def open_remote(sess):
+        opened.append(sess.meta.get("patient_ref"))
+        return True
+
+    manager._send_segment = failing_send
+    manager._open_remote = open_remote
+    manager._collect_receipts = lambda s: asyncio.sleep(0)
+
+    await manager._drain_once()
+
+    # The second session still got its chance to register.
+    assert "LATER" in opened
