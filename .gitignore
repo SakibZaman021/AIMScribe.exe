@@ -45,6 +45,11 @@ recorder/dist/
 recorder/build/
 *.dpapi
 *.pem
+# Exception: the two public halves the installer ships. They are identical on
+# every doctor PC and carry no secret. The blanket rule above stays, because it
+# is what keeps a private key out of a public repository - and it has already
+# earned its place once.
+!recorder/keys/*_pub.pem
 *.key
 *.crt
 spool/
