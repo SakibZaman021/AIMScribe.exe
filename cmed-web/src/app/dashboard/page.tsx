@@ -77,6 +77,11 @@ export default function DashboardPage() {
 
   const [nerData, setNerData] = useState<NERFields | null>(null);
   const [nerVersion, setNerVersion] = useState(0);
+  // The agent reports no session once recording stops, but the transcript and
+  // prescription for the last clips arrive after that. Hold the id so the
+  // results can still be collected.
+  const [resultsFor, setResultsFor] = useState<string | null>(null);
+  const [nerFinal, setNerFinal] = useState(false);
   const [editedFields, setEditedFields] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -162,20 +167,35 @@ export default function DashboardPage() {
 
   // ---- NER polling (fallback when the webhook cannot reach us) ----
 
+  // Follow the active session, and keep following it after it ends.
   useEffect(() => {
-    if (!status?.sessionId || !status.isRecording) return;
+    if (status?.sessionId && status.sessionId !== resultsFor) {
+      setResultsFor(status.sessionId);
+      setNerFinal(false);
+      setNerVersion(0);
+      setNerData(null);
+    }
+  }, [status?.sessionId, resultsFor]);
 
-    const poll = setInterval(async () => {
+  useEffect(() => {
+    // Polling used to stop the moment recording did. The last clip is still
+    // being transcribed at that point, so the doctor pressed Stop and the
+    // prescription never appeared - the one moment they actually need it.
+    // It now runs until the backend says the results are final.
+    if (!resultsFor || nerFinal) return;
+
+    const fetchResults = async () => {
       try {
-        const response = await axios.get(`${BACKEND_API}/ner/${status.sessionId}`);
+        const response = await axios.get(`${BACKEND_API}/ner/${resultsFor}`);
         const data = response.data;
         if (data.version > nerVersion && data.fields) {
           setNerData(normalizeNerData(data.fields));
           setNerVersion(data.version);
         }
+        if (data.is_final) setNerFinal(true);
       } catch {
         try {
-          const fallback = await axios.get(`/api/webhook/ner?session_id=${status.sessionId}`);
+          const fallback = await axios.get(`/api/webhook/ner?session_id=${resultsFor}`);
           if (fallback.data.version > nerVersion && fallback.data.ner) {
             setNerData(fallback.data.ner);
             setNerVersion(fallback.data.version);
@@ -184,10 +204,12 @@ export default function DashboardPage() {
           /* both unavailable; try again next tick */
         }
       }
-    }, 4000);
+    };
 
+    fetchResults();
+    const poll = setInterval(fetchResults, 4000);
     return () => clearInterval(poll);
-  }, [status?.sessionId, status?.isRecording, nerVersion]);
+  }, [resultsFor, nerFinal, nerVersion]);
 
   // ---- derived ----
 
