@@ -26,6 +26,9 @@ param(
     [Parameter(Mandatory = $true)][string] $CmedOrigin,
     [string] $EnrollmentToken,
     [string] $SourceDir     = (Join-Path $PSScriptRoot 'dist\AIMScribe_Agent'),
+    # The two public keys every agent needs. Identical on every PC, so they
+    # ship with the installer rather than being copied by hand twenty times.
+    [string] $KeysDir       = (Join-Path $PSScriptRoot 'keys'),
     [string] $InstallDir    = (Join-Path $env:ProgramFiles 'AIMScribe'),
     [string] $DataDir       = (Join-Path $env:ProgramData 'AIMScribe'),
     [int]    $SpoolGb       = 40,
@@ -68,9 +71,62 @@ if ($signature.Status -ne 'Valid') {
 }
 
 # ---- files ----
+#
+# Every install is a replacement, because this is also the upgrade path and a
+# partial install from a failed run leaves files behind. Copy-Item -Force cannot
+# overwrite a file that is locked or has had its inheritance stripped, and fails
+# with a bare "Access denied" that says nothing about why.
 Write-Host "Installing to $InstallDir ..."
+
+$task = Get-ScheduledTask -TaskName 'AIMScribe Agent' -ErrorAction SilentlyContinue
+if ($task) {
+    Write-Host '  stopping the existing agent'
+    Stop-ScheduledTask -TaskName 'AIMScribe Agent' -ErrorAction SilentlyContinue
+}
+Get-Process -Name 'AIMScribe_Agent' -ErrorAction SilentlyContinue | ForEach-Object {
+    Write-Host "  stopping running agent (PID $($_.Id))"
+    Stop-Process -Id $_.Id -Force
+}
+Start-Sleep -Seconds 2
+
+if (Test-Path $InstallDir) {
+    Write-Host '  removing the previous version'
+    # Restore inheritance first: a previous run may have stripped it, and the
+    # program files carry nothing worth preserving - configuration and audio
+    # live in DataDir, which is never touched here.
+    & icacls $InstallDir /reset /T /Q 2>&1 | Out-Null
+    try {
+        Remove-Item $InstallDir -Recurse -Force -ErrorAction Stop
+    }
+    catch {
+        throw ("Could not replace $InstallDir : $($_.Exception.Message)`n" +
+               "Something is holding a file open - antivirus, Explorer, or a " +
+               "running agent. Close it, or reboot, and run this again.")
+    }
+}
+
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Copy-Item (Join-Path $SourceDir '*') $InstallDir -Recurse -Force
+
+# ---- pinned public keys ----
+#
+# cmed_grant_pub.pem verifies the recording grant; without it the agent refuses
+# to record. aimslab_receipt_pub.pem verifies purge receipts; without it local
+# audio is never deleted, which is the safe direction but fills the disk.
+$keyTargets = @{
+    'cmed_grant_pub.pem'      = 'grant verification'
+    'aimslab_receipt_pub.pem' = 'purge receipt verification'
+}
+$missingKeys = @()
+foreach ($keyName in $keyTargets.Keys) {
+    $src = Join-Path $KeysDir $keyName
+    if (Test-Path $src) {
+        Copy-Item $src (Join-Path $DataDir 'keys') -Force
+        Write-Host "  installed $keyName ($($keyTargets[$keyName]))"
+    } else {
+        $missingKeys += $keyName
+    }
+}
 
 Write-Host "Preparing machine state in $DataDir ..."
 foreach ($sub in @('spool', 'keys', 'logs', 'state')) {
@@ -79,27 +135,56 @@ foreach ($sub in @('spool', 'keys', 'logs', 'state')) {
 
 # Administrators and SYSTEM full control; the interactive user gets Modify so the
 # agent can write its spool and logs, but cannot replace the program files.
+#
+# Set on the folder only, and let (OI)(CI) propagate. Adding /T here strips
+# inherited permissions from every existing FILE, while (OI)(CI) grants attach
+# only to directories - so every file is left with an empty permission list and
+# becomes unreadable by everyone, including its owner. That silently locked the
+# agent out of its own device key and its spooled audio.
+#
+# /reset first, because a previous run may already have done exactly that.
+& icacls $DataDir /reset /T /C /Q 2>&1 | Out-Null
 & icacls $DataDir /inheritance:r `
     /grant:r 'SYSTEM:(OI)(CI)F' `
     /grant:r 'Administrators:(OI)(CI)F' `
-    /grant:r 'Users:(OI)(CI)M' /T /Q | Out-Null
+    /grant:r 'Users:(OI)(CI)M' /Q | Out-Null
 
+& icacls $InstallDir /reset /T /C /Q 2>&1 | Out-Null
 & icacls $InstallDir /inheritance:r `
     /grant:r 'SYSTEM:(OI)(CI)F' `
     /grant:r 'Administrators:(OI)(CI)F' `
-    /grant:r 'Users:(OI)(CI)RX' /T /Q | Out-Null
+    /grant:r 'Users:(OI)(CI)RX' /Q | Out-Null
 
 # ---- configuration ----
-$apiKey = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+# RandomNumberGenerator::GetBytes(int) is a static added in .NET 5. Windows
+# PowerShell 5.1 - which is what ships on a hospital PC and is what an
+# administrator will actually run this in - is on .NET Framework, where that
+# static does not exist and the installer dies before writing anything.
+# Create() plus the instance method works on both.
+$rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+try {
+    $apiKeyBytes = New-Object byte[] 32
+    $rng.GetBytes($apiKeyBytes)
+    $apiKey = [Convert]::ToBase64String($apiKeyBytes)
+}
+finally {
+    $rng.Dispose()
+}
 $spoolBytes = [int64]$SpoolGb * 1GB
 
 $envPath = Join-Path $InstallDir '.env'
 $envBody = @"
 # Generated by install.ps1 on $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'). Do not edit by hand.
 AIMS_BACKEND_URL=$BackendUrl
-AIMS_BACKEND_API_PREFIX=/api/v1
-AIMS_CLIENT_CERT_PATH=$DataDir\keys\device.crt
-AIMS_CLIENT_KEY_PATH=$DataDir\keys\device.key
+# Protocol 2. The v1 prefix serves the transcription API and has none of the
+# enrolment or session endpoints, so an agent pointed there fails at enrolment.
+AIMS_BACKEND_API_PREFIX=/api/v2
+
+# mTLS is not used. Render terminates TLS itself and offers no client
+# certificates, so the agent authenticates with the device bearer token issued
+# at enrolment. Set these only if the backend moves somewhere that requires one.
+AIMS_CLIENT_CERT_PATH=
+AIMS_CLIENT_KEY_PATH=
 
 AIMS_SAMPLE_RATE=44100
 AIMS_CHANNELS=1
