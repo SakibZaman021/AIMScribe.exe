@@ -402,8 +402,40 @@ def _copy_to_clipboard(text: str) -> bool:
 # Entry point
 # ============================================================
 
+def _ensure_std_streams() -> None:
+    """
+    Give the process real stdout and stderr before anything tries to log.
+
+    A PyInstaller --windowed build has neither: sys.stdout and sys.stderr are
+    None. Our own logging skips the console when frozen, but uvicorn installs
+    its own handler on sys.stderr during startup, and that raises on None. The
+    result is an agent that writes its banner, dies before the listener opens,
+    and leaves no traceback anywhere - which is exactly how it failed the first
+    time the built executable was run.
+
+    Pointed at the log directory rather than os.devnull so that anything written
+    outside the logging framework - a C extension, an unhandled exception during
+    interpreter shutdown - is still recoverable from a clinical machine.
+    """
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+
+    try:
+        config.paths.logs_dir.mkdir(parents=True, exist_ok=True)
+        target = open(config.paths.logs_dir / "agent-stderr.log", "a",
+                      encoding="utf-8", buffering=1)
+    except OSError:
+        target = open(os.devnull, "w", encoding="utf-8")
+
+    if sys.stdout is None:
+        sys.stdout = target
+    if sys.stderr is None:
+        sys.stderr = target
+
+
 def main() -> int:
     config.ensure_directories()
+    _ensure_std_streams()
     setup_logging()
 
     logger.info("=" * 68)
