@@ -240,10 +240,31 @@ begin
 
   Cmd := '/Create /TN "AIMScribe Agent" /TR "\"' + ExpandConstant('{app}\{#AppExe}') +
          '\"" /SC ONLOGON /RL HIGHEST /F';
+
+  { Three ways this goes wrong, and all three used to end with Setup reporting
+    success: schtasks not launching, schtasks failing, and schtasks reporting
+    success while creating nothing. The last one is not hypothetical - it is
+    what happened on the first machine, and the PC then installed cleanly,
+    started nothing at logon, and was discovered by a doctor with a patient in
+    front of them.
+
+    So the task is verified by querying for it, and a failure aborts the
+    install. A machine that half-installed is worse than one that plainly did
+    not: the second gets fixed, the first gets used. }
   if not Exec('schtasks.exe', Cmd, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-    MsgBox('Could not register the startup task. AIMScribe will not start ' +
-           'automatically at logon; start it from the Start menu.',
-           mbError, MB_OK);
+    RaiseException('Could not run schtasks.exe to register the startup task.' + #13#10 +
+                   'AIMScribe has not been installed.');
+
+  if ResultCode <> 0 then
+    RaiseException('Registering the startup task failed (schtasks returned ' +
+                   IntToStr(ResultCode) + ').' + #13#10 +
+                   'AIMScribe has not been installed.');
+
+  Exec('schtasks.exe', '/Query /TN "AIMScribe Agent"', '',
+       SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if ResultCode <> 0 then
+    RaiseException('The startup task was reported as created but does not ' +
+                   'exist.' + #13#10 + 'AIMScribe has not been installed.');
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;

@@ -165,6 +165,10 @@ class SessionSpool:
         self.duration_seconds = 0.0
         self.paused_seconds = 0.0
         self.close_reason = ""
+        # Chain entries the backend has acknowledged. Segments track their own
+        # state; this covers pause and resume, which are links in the same chain
+        # and were previously sent once and forgotten.
+        self.reported_entries: set = set()
 
         self._journal_path = directory / JOURNAL_NAME
 
@@ -301,6 +305,8 @@ class SessionSpool:
                     spool.close_reason = record.get("reason", "")
                 elif kind == "close_reported":
                     spool.close_reported = True
+                elif kind == "entry_reported":
+                    spool.reported_entries.add(record["entry_no"])
 
         return spool
 
@@ -506,6 +512,27 @@ class SessionSpool:
                 "paused_seconds": round(paused_seconds, 3),
             })
             return entry
+
+    def mark_entry_reported(self, entry_no: int) -> None:
+        with self._lock:
+            if entry_no in self.reported_entries:
+                return
+            self.reported_entries.add(entry_no)
+            self._append_journal({"rec": "entry_reported", "entry_no": entry_no})
+
+    def pending_notifications(self) -> List[ChainEntry]:
+        """
+        Pause and resume entries the backend has not acknowledged.
+
+        These are chain links, not status updates. If one is missing, every entry
+        after it fails verification - the backend sees a prev_hash that does not
+        follow its stored head and quarantines the session, which is what
+        happened to a real consultation.
+        """
+        with self._lock:
+            return [e for e in self.chain
+                    if e.entry_type in ("pause", "resume")
+                    and e.entry_no not in self.reported_entries]
 
     def mark_close_reported(self) -> None:
         with self._lock:

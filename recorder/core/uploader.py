@@ -204,26 +204,36 @@ class UploadManager:
                     # on the next tick. This is the normal outage path.
                     continue
 
-            # Strictly in order, and stop at the first failure.
+            # Strictly in chain order, and stop at the first failure.
             #
             # The chain is sequential: every entry's prev_hash is the previous
-            # entry's hash, so a segment that arrives before its predecessor
-            # cannot verify and the backend quarantines the whole session. This
-            # loop used to discard the result and carry on to the next segment,
-            # so one failed upload - a dropped connection, a stale presigned URL
-            # - reordered everything after it and cost a real consultation.
+            # entry's hash, so an entry that arrives before its predecessor
+            # cannot verify and the backend quarantines the whole session.
             #
-            # Leaving the rest pending is free: they are sealed on disk and the
-            # next tick retries from the one that failed.
-            for segment in session.pending_segments():
+            # Segments used to be the only thing retried here. Pause and resume
+            # were sent once, best-effort, on the theory that the chain copy
+            # would arrive at close - but the backend verifies each entry as it
+            # lands, so a dropped pause broke every segment after it. A real
+            # consultation was quarantined that way. Both kinds are delivered
+            # here now, interleaved by entry number, which is the order the
+            # chain was built in.
+            #
+            # Leaving the rest pending is free: everything is sealed on disk and
+            # the next tick retries from whichever entry failed.
+            work = [(s.entry_no, "segment", s) for s in session.pending_segments()]
+            work += [(e.entry_no, "notify", e) for e in session.pending_notifications()]
+
+            for entry_no, kind, item in sorted(work, key=lambda w: w[0]):
                 if not self._running:
                     return
-                outcome = await self._send_segment(session, segment)
-                if not outcome.ok:
+                if kind == "segment":
+                    ok = (await self._send_segment(session, item)).ok
+                else:
+                    ok = await self._notify_chain_entry(session, item)
+                if not ok:
                     logger.debug(
-                        "Segment %s of %s did not land; holding the rest of the "
-                        "session to preserve chain order",
-                        segment.seq_no, session.session_id)
+                        "Chain entry %s of %s did not land; holding the rest of "
+                        "the session to preserve order", entry_no, session.session_id)
                     break
 
             # A session closed while the backend was unreachable still needs its
@@ -231,7 +241,10 @@ class UploadManager:
             # archived. Retried here once every segment has landed.
             if (session.closed_at is not None
                     and not session.close_reported
-                    and not session.pending_segments()):
+                    and not session.pending_segments()
+                    # Close verifies the whole chain, so it must not run while a
+                    # pause is still undelivered.
+                    and not session.pending_notifications()):
                 await self.close_remote(
                     session,
                     duration_seconds=session.duration_seconds,
@@ -362,25 +375,36 @@ class UploadManager:
         })
         return UploadOutcome(session.session_id, seq_no, True, object_key)
 
+    async def _notify_chain_entry(self, session: SessionSpool, entry) -> bool:
+        """
+        Deliver one pause or resume entry, and remember that it landed.
+
+        Retried by the drain loop until it does. A pause is a link in the hash
+        chain, so losing it is not a cosmetic loss of a dashboard update - it
+        invalidates every entry recorded after it.
+        """
+        endpoint = "/session/pause" if entry.entry_type == "pause" else "/session/resume"
+        if await self._post(endpoint, {
+            "session_id": session.session_id,
+            "chain_entry": entry.to_wire(),
+        }, attempts=1) is None:
+            return False
+        session.mark_entry_reported(entry.entry_no)
+        return True
+
     async def notify_pause(self, session: SessionSpool, entry) -> bool:
         """
-        Best-effort real-time hint so the operator dashboard sees the pause now.
+        Send the pause immediately so the dashboard reflects it now.
 
-        Single attempt on purpose: the authoritative copy is the chain entry in the
-        spool journal, which is delivered again inside the manifest at close. This
-        must never delay the doctor.
+        One attempt, because this runs while the doctor is waiting. If it fails
+        the drain loop retries it - which is the difference between a late
+        dashboard update and a quarantined consultation.
         """
-        return await self._post("/session/pause", {
-            "session_id": session.session_id,
-            "chain_entry": entry.to_wire(),
-        }, attempts=1) is not None
+        return await self._notify_chain_entry(session, entry)
 
     async def notify_resume(self, session: SessionSpool, entry) -> bool:
-        """Best-effort, as for notify_pause."""
-        return await self._post("/session/resume", {
-            "session_id": session.session_id,
-            "chain_entry": entry.to_wire(),
-        }, attempts=1) is not None
+        """As for notify_pause."""
+        return await self._notify_chain_entry(session, entry)
 
     async def close_remote(
         self, session: SessionSpool, *, duration_seconds: float, paused_seconds: float

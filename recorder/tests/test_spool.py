@@ -412,3 +412,64 @@ async def test_one_failing_session_does_not_block_the_others(spool, device_key, 
 
     # The second session still got its chance to register.
     assert "LATER" in opened
+
+
+# ============================================================
+# Pause and resume are chain links, not status updates
+#
+# They were delivered once, best-effort, on the theory that the chain copy would
+# arrive with the manifest at close. The backend verifies each entry as it
+# lands, so a dropped pause left every later segment carrying a prev_hash the
+# server had never seen, and the whole consultation was quarantined. It happened
+# to a real one.
+# ============================================================
+
+def test_pause_and_resume_are_pending_until_delivered(spool, device_key, audio_params):
+    session = _open(spool, device_key, audio_params)
+    pause = session.append_chain_entry("pause", crypto.pause_payload(
+        reason="sensitive_personal_matter", reason_detail="", authorised_by="DR001",
+        supervisor_required=False, at=datetime(2026, 7, 29, 1, 31, tzinfo=timezone.utc)))
+    resume = session.append_chain_entry("resume", {"type": "resume"})
+
+    assert [e.entry_no for e in session.pending_notifications()] == [
+        pause.entry_no, resume.entry_no]
+
+    session.mark_entry_reported(pause.entry_no)
+    assert [e.entry_no for e in session.pending_notifications()] == [resume.entry_no]
+
+    session.mark_entry_reported(resume.entry_no)
+    assert session.pending_notifications() == []
+
+
+def test_undelivered_pause_survives_a_restart(spool, device_key, audio_params):
+    """The agent dying must not be what loses the entry - that is when it matters."""
+    session = _open(spool, device_key, audio_params)
+    pause = session.append_chain_entry("pause", crypto.pause_payload(
+        reason="clinical_examination", reason_detail="", authorised_by="DR001",
+        supervisor_required=False, at=datetime(2026, 7, 29, 1, 31, tzinfo=timezone.utc)))
+    resume = session.append_chain_entry("resume", {"type": "resume"})
+    session.mark_entry_reported(pause.entry_no)
+
+    recovered = [s for s in spool.recover(device_key) if s.session_id == session.session_id]
+    assert len(recovered) == 1
+    assert [e.entry_no for e in recovered[0].pending_notifications()] == [resume.entry_no]
+
+
+def test_a_pause_is_ordered_before_the_segments_that_follow_it(spool, device_key, audio_params):
+    """
+    The drain loop sorts its work by entry number. A pause recorded between two
+    segments has to be delivered between them, or the second segment's prev_hash
+    refers to something the backend has not stored.
+    """
+    session = _open(spool, device_key, audio_params)
+    first = _seal(session, 1.0)
+    pause = session.append_chain_entry("pause", crypto.pause_payload(
+        reason="patient_request", reason_detail="", authorised_by="DR001",
+        supervisor_required=False, at=datetime(2026, 7, 29, 1, 31, tzinfo=timezone.utc)))
+    second = _seal(session, 1.0)
+
+    work = [(s.entry_no, "segment") for s in session.pending_segments()]
+    work += [(e.entry_no, "notify") for e in session.pending_notifications()]
+
+    assert [kind for _, kind in sorted(work)] == ["segment", "notify", "segment"]
+    assert first.entry_no < pause.entry_no < second.entry_no
