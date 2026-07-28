@@ -247,12 +247,21 @@ class WebSocketManager:
         register = None
         if self._uploader is not None and self._hospital_id:
             register = await self._uploader.fetch_doctors(self._hospital_id)
+
+        assigned = self._controller.doctor_id if self._controller else ""
+        if not register and assigned:
+            # The register is unreachable - the backend is down, or this agent is
+            # talking to one that predates it. Offer the machine's own doctor
+            # rather than an empty list: a consulting room that cannot record
+            # because a web request failed is a worse outcome than one that
+            # records under its usual doctor.
+            register = [{"doctor_id": assigned, "full_name": assigned}]
+
         return self._ack("doctors", {
             "hospital_id": self._hospital_id or None,
             # The machine's usual doctor, pre-selected so the common case stays
             # one click.
-            "assigned_doctor_id": (
-                self._controller.doctor_id if self._controller else "") or None,
+            "assigned_doctor_id": assigned or None,
             "doctors": register or [],
         })
 
