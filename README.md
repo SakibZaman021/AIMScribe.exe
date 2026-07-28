@@ -98,22 +98,22 @@ npm run dev
 
 Copy `.env.local.example` to `.env.local` first and fill it in.
 
-There is no doctor login. Doctors are chosen from a register:
+There is no doctor login, and the browser never names a doctor. Each PC is
+enrolled to one doctor at one hospital by an administrator, and the agent takes
+both from that enrolment. The page chooses the patient and nothing else — so a
+typo cannot file a consultation under a doctor who does not exist, and a page
+the doctor happens to visit cannot start a recording.
 
+The doctor register is therefore observed rather than configured. Query
+`v_doctors` and `v_doctor_activity` in the database:
+
+```sql
+SELECT * FROM v_doctor_activity;   -- DR001 saw 5 patients today
+SELECT * FROM v_doctors;           -- everyone seen, and whether a PC is enrolled
 ```
-AIMS_DOCTORS=DR001:Dr Sakib Zaman,DR002:Dr Ayesha Rahman
-```
 
-That keeps the value a real person rather than free text — without it,
-`doctor_id` is whatever the browser sends, and the archive is filed by doctor,
-so a typo creates a folder nobody will ever open again.
-
-It is a selection, not proof of who is at the keyboard. Anyone who can open the
-page can pick any name on the list. The hospital cannot be faked the same way:
-the agent checks the grant against the hospital its device was enrolled at and
-refuses a mismatch. When attribution has to hold up in a dispute, replace
-`resolveDoctor()` in `src/lib/doctors.ts` with the hospital's identity provider;
-nothing else changes.
+A doctor listed there with `devices_enrolled = 0` is a leftover from before
+this, when the browser could name anyone.
 
 Check a deployment with `GET /api/config-check`, which reports which variables
 are set without ever returning a value.
@@ -149,7 +149,7 @@ cd recorder
 python -m pytest
 ```
 
-67 tests, including a regression for each security defect listed in
+70 tests, including a regression for each security defect listed in
 `SECURITY_HARDENING_PLAN.md`.
 
 ---
