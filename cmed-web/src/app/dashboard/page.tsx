@@ -60,6 +60,9 @@ export default function DashboardPage() {
   const router = useRouter();
 
   const [patientData, setPatientData] = useState<PatientData | null>(null);
+  // No patient in this tab. Not necessarily a reason to leave: a recording may
+  // be running that the doctor still needs to stop.
+  const [patientMissing, setPatientMissing] = useState(false);
 
   const clientRef = useRef<AimscribeClient | null>(null);
   const [connected, setConnected] = useState(false);
@@ -295,6 +298,86 @@ export default function DashboardPage() {
       setNotice('Prescription saved.');
     });
 
+  const renderPauseDialog = () => (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
+            <h3 className="text-lg font-semibold text-gray-800">Pause Recording</h3>
+            <p className="text-sm text-gray-600 mt-1">
+              The pause, its reason, and who authorised it are recorded with the
+              consultation.
+            </p>
+
+            <label className="block text-sm font-medium text-gray-700 mt-4 mb-1">Reason</label>
+            <select
+              value={pauseReason}
+              onChange={(e) => setPauseReason(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+            >
+              {PAUSE_REASONS.map((reason) => (
+                <option key={reason.value} value={reason.value}>{reason.label}</option>
+              ))}
+            </select>
+
+            <label className="block text-sm font-medium text-gray-700 mt-4 mb-1">
+              Detail {pauseReason === 'other' && <span className="text-red-600">*</span>}
+            </label>
+            <textarea
+              rows={2}
+              value={pauseDetail}
+              onChange={(e) => setPauseDetail(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+              placeholder="Optional note for the record"
+            />
+
+            <label className="block text-sm font-medium text-gray-700 mt-4 mb-1">
+              Expected length
+            </label>
+            <select
+              value={expectedMinutes}
+              onChange={(e) => setExpectedMinutes(Number(e.target.value))}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+            >
+              {[1, 2, 5, 10, 20].map((minutes) => (
+                <option key={minutes} value={minutes}>{minutes} minute(s)</option>
+              ))}
+            </select>
+
+            {needsSupervisor && (
+              <div className="mt-4">
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Authorising supervisor <span className="text-red-600">*</span>
+                </label>
+                <input
+                  value={supervisor}
+                  onChange={(e) => setSupervisor(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                  placeholder="Supervisor name or ID"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Required for pauses over {SUPERVISOR_THRESHOLD_SECONDS / 60} minutes.
+                </p>
+              </div>
+            )}
+
+            <div className="flex justify-end gap-3 mt-6">
+              <button
+                onClick={() => setShowPause(false)}
+                className="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handlePause}
+                disabled={busy}
+                className="px-4 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 disabled:bg-gray-300"
+              >
+                Pause Recording
+              </button>
+            </div>
+          </div>
+        </div>
+  );
+
   // ---- render helpers ----
 
   const renderArrayField = (label: string, key: string, data: string[] | undefined) => {
@@ -314,6 +397,57 @@ export default function DashboardPage() {
   };
 
   if (!patientData) {
+    // A recording is running but this tab does not know which patient it is
+    // for. Show enough to take control of it - stopping the wrong consultation
+    // is recoverable, being unable to stop one is not.
+    if (status?.isRecording) {
+      return (
+        <div className="min-h-screen bg-gray-50 flex items-center justify-center p-6">
+          <div className="bg-white rounded-xl shadow p-6 max-w-md w-full space-y-4">
+            <div className="flex items-center gap-2">
+              <span className="w-3 h-3 bg-red-500 rounded-full recording-pulse" />
+              <span className="font-semibold text-red-700">
+                {status.isPaused ? 'Paused' : 'Recording in progress'}
+              </span>
+            </div>
+            <p className="text-sm text-gray-600">
+              Patient {status.patientRef ?? 'unknown'} · {status.doctorId ?? '—'}
+              {status.hospitalId ? ` · ${status.hospitalId}` : ''}
+              <br />
+              {formatDuration(status.durationSeconds)} · {status.segmentCount} clip(s)
+            </p>
+            <p className="text-xs text-gray-500">
+              This tab has no patient loaded, so the consultation view is not
+              available - but the recording can still be controlled from here.
+            </p>
+            {error && <p className="text-sm text-red-600">{error}</p>}
+            <div className="space-y-2">
+              {!status.isPaused && (
+                <button onClick={() => setShowPause(true)} disabled={busy}
+                  className="w-full py-3 rounded-lg font-semibold bg-amber-500 text-white hover:bg-amber-600">
+                  Pause Recording
+                </button>
+              )}
+              {status.isPaused && (
+                <button onClick={handleResume} disabled={busy}
+                  className="w-full py-3 rounded-lg font-semibold bg-green-600 text-white hover:bg-green-700">
+                  Resume Recording
+                </button>
+              )}
+              <button onClick={handleStop} disabled={busy}
+                className="w-full py-2 rounded-lg font-medium border border-gray-300 text-gray-700 hover:bg-gray-50">
+                Stop Recording
+              </button>
+              <button onClick={() => router.push('/')}
+                className="w-full py-2 text-sm text-blue-600 underline">
+                Go to patient entry
+              </button>
+            </div>
+          </div>
+          {showPause && renderPauseDialog()}
+        </div>
+      );
+    }
     return <div className="p-8 text-center text-gray-500">Loading…</div>;
   }
 
@@ -628,86 +762,7 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Pause dialog - a reason is mandatory, which is what makes the gap defensible */}
-      {showPause && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
-            <h3 className="text-lg font-semibold text-gray-800">Pause Recording</h3>
-            <p className="text-sm text-gray-600 mt-1">
-              The pause, its reason, and who authorised it are recorded with the
-              consultation.
-            </p>
-
-            <label className="block text-sm font-medium text-gray-700 mt-4 mb-1">Reason</label>
-            <select
-              value={pauseReason}
-              onChange={(e) => setPauseReason(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-            >
-              {PAUSE_REASONS.map((reason) => (
-                <option key={reason.value} value={reason.value}>{reason.label}</option>
-              ))}
-            </select>
-
-            <label className="block text-sm font-medium text-gray-700 mt-4 mb-1">
-              Detail {pauseReason === 'other' && <span className="text-red-600">*</span>}
-            </label>
-            <textarea
-              rows={2}
-              value={pauseDetail}
-              onChange={(e) => setPauseDetail(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-              placeholder="Optional note for the record"
-            />
-
-            <label className="block text-sm font-medium text-gray-700 mt-4 mb-1">
-              Expected length
-            </label>
-            <select
-              value={expectedMinutes}
-              onChange={(e) => setExpectedMinutes(Number(e.target.value))}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-            >
-              {[1, 2, 5, 10, 20].map((minutes) => (
-                <option key={minutes} value={minutes}>{minutes} minute(s)</option>
-              ))}
-            </select>
-
-            {needsSupervisor && (
-              <div className="mt-4">
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Authorising supervisor <span className="text-red-600">*</span>
-                </label>
-                <input
-                  value={supervisor}
-                  onChange={(e) => setSupervisor(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                  placeholder="Supervisor name or ID"
-                />
-                <p className="text-xs text-gray-500 mt-1">
-                  Required for pauses over {SUPERVISOR_THRESHOLD_SECONDS / 60} minutes.
-                </p>
-              </div>
-            )}
-
-            <div className="flex justify-end gap-3 mt-6">
-              <button
-                onClick={() => setShowPause(false)}
-                className="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handlePause}
-                disabled={busy}
-                className="px-4 py-2 bg-amber-500 text-white rounded-lg hover:bg-amber-600 disabled:bg-gray-300"
-              >
-                Pause Recording
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {showPause && renderPauseDialog()}
     </div>
   );
 }
