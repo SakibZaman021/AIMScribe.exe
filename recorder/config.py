@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import List, Optional
 
 APP_NAME = "AIMScribe Recorder"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 
 # Wire format version. The server rejects a mismatched agent rather than guessing.
 PROTOCOL_VERSION = 2
