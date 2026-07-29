@@ -4,15 +4,19 @@
  * Issues the signed authorisation the AIMScribe agent needs before it will record.
  * The agent will not start without one, and only this route can produce one.
  *
- * There is no doctor login. The hospital belongs to the machine - an
- * administrator enrols each PC to one, and a PC does not move between hospitals.
+ * This app stands in for the real CMED site, which triggers a recording when a
+ * doctor opens a patient. The real trigger carries five things: doctor, hospital,
+ * patient, start time and date. Doctor and hospital travel in the signed grant,
+ * because they describe the consultation and neither belongs to the machine.
  *
- * The doctor does not belong to the machine. A consulting room is shared and the
- * rota changes, so the page names the doctor for each consultation, chosen from
- * the register the agent supplies. That name is not trusted here: the backend
- * checks it against the hospital's register when the session opens and refuses a
- * doctor who is not credentialed to record there. Free text never reaches the
- * archive.
+ * A consulting room runs two shifts. The morning doctors and the afternoon
+ * doctors share the same laptops, and a doctor can be moved to another site at a
+ * day's notice - so taking either value from the PC's enrolment filed
+ * consultations under whoever was enrolled there, silently and in the filename.
+ *
+ * CMED is the authority on both: doctors log in there and it knows who is on
+ * shift. The enrolment still decides whether a machine may record at all, which
+ * is the property that actually matters.
  *
  * This route still matters, because the agent refuses to record without a grant
  * - so a random page the doctor visits cannot start a recording, even though
@@ -53,13 +57,16 @@ export async function POST(request: NextRequest) {
   }
 
   let patientRef: string;
-  let doctorId = '';
+  let doctorId: string;
+  let hospitalId = '';
   try {
     patientRef = assertSafeIdentifier(String(body.patient_ref ?? ''), 'patient_ref');
-    // Optional: a PC with one regular doctor need not name one, and the agent
-    // falls back to its enrolment.
-    if (body.doctor_id) {
-      doctorId = assertSafeIdentifier(String(body.doctor_id), 'doctor_id');
+    // Required. There is no fallback anywhere in the chain: the agent refuses a
+    // trigger that names no doctor rather than guessing, because guessing is
+    // what filed afternoon consultations under the morning doctor.
+    doctorId = assertSafeIdentifier(String(body.doctor_id ?? ''), 'doctor_id');
+    if (body.hospital_id) {
+      hospitalId = assertSafeIdentifier(String(body.hospital_id), 'hospital_id');
     }
   } catch (error) {
     return NextResponse.json(
@@ -69,12 +76,10 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    // The hospital is left empty on purpose: this server does not know it and
-    // must not guess. The agent fills it from its enrolment.
     const { grant, expiresIn } = await mintGrant({
       doctorId,
       doctorName: '',
-      hospitalId: '',
+      hospitalId,
       patientRef,
       consentObtained: true,
       consentMethod: String(body.consent_method ?? 'verbal_at_reception').slice(0, 64),

@@ -496,9 +496,14 @@ class SessionSpool:
                 self._append_journal({"rec": "acknowledged", "at": time.time()})
 
     def close(self, *, duration_seconds: float, paused_seconds: float,
-              reason: str = "") -> ChainEntry:
+              reason: str = "", at: Optional[datetime] = None) -> ChainEntry:
         with self._lock:
-            self.closed_at = datetime.now(timezone.utc)
+            # `at` lets the caller supply the exact instant. When one patient
+            # supersedes another, CMED's record needs this consultation to end
+            # at precisely the moment the next one begins - not a few hundred
+            # milliseconds later, once the microphone has been torn down and the
+            # final segment sealed.
+            self.closed_at = at or datetime.now(timezone.utc)
             self.duration_seconds = duration_seconds
             self.paused_seconds = paused_seconds
             self.close_reason = reason

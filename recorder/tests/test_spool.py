@@ -473,3 +473,23 @@ def test_a_pause_is_ordered_before_the_segments_that_follow_it(spool, device_key
 
     assert [kind for _, kind in sorted(work)] == ["segment", "notify", "segment"]
     assert first.entry_no < pause.entry_no < second.entry_no
+
+
+def test_close_can_be_stamped_at_a_given_instant(spool, device_key, audio_params):
+    """
+    CMED treats consultations as contiguous: the next patient's start time is
+    this patient's end time. Reading the clock twice put the microphone teardown
+    and the final segment seal in between, so the two records disagreed.
+    """
+    session = _open(spool, device_key, audio_params)
+    _seal(session, 1.0)
+    boundary = datetime(2026, 7, 29, 10, 45, 30, tzinfo=timezone.utc)
+
+    session.close(duration_seconds=1.0, paused_seconds=0.0,
+                  reason="superseded_by_new_patient", at=boundary)
+
+    assert session.closed_at == boundary
+    close_entry = session.chain[-1]
+    assert close_entry.entry_type == "close"
+    assert close_entry.payload["closed_at"] == crypto.iso_utc(boundary)
+    assert close_entry.payload["reason"] == "superseded_by_new_patient"

@@ -16,7 +16,7 @@
 ; ============================================================
 
 #define AppName        "AIMScribe Agent"
-#define AppVersion     "2.1.2"
+#define AppVersion     "2.2.0"
 #define AppPublisher   "AIMS LAB"
 #define AppExe         "AIMScribe_Agent.exe"
 
@@ -84,17 +84,36 @@ Filename: "taskkill.exe"; Parameters: "/IM {#AppExe} /F"; \
 var
   ConfigPage: TInputQueryWizardPage;
 
+{ An upgrade, not a first install. Enrolment lives under ProgramData and is
+  never touched by Setup, so a machine that has already been enrolled keeps its
+  doctor and hospital across every upgrade. Detecting that is what lets the
+  token field be left empty without a frightening warning. }
+function AlreadyEnrolled(): Boolean;
+begin
+  Result := FileExists(ExpandConstant('{commonappdata}\AIMScribe\state\device.token'));
+end;
+
 procedure InitializeWizard;
 begin
-  ConfigPage := CreateInputQueryPage(wpSelectDir,
-    'AIMScribe Configuration',
-    'Which backend, and which doctor is this PC for?',
-    'The enrolment token names the doctor and hospital this machine records for.' + #13#10 +
-    'Obtain one per PC from the AIMScribe administrator.');
+  if AlreadyEnrolled() then
+    ConfigPage := CreateInputQueryPage(wpSelectDir,
+      'AIMScribe Configuration',
+      'This PC is already set up. Updating it.',
+      'It keeps the doctor and hospital it was enrolled with, so no enrolment' + #13#10 +
+      'token is needed. Leave the last box empty and press Next.')
+  else
+    ConfigPage := CreateInputQueryPage(wpSelectDir,
+      'AIMScribe Configuration',
+      'Which backend, and which doctor is this PC for?',
+      'The enrolment token names the doctor and hospital this machine records for.' + #13#10 +
+      'Obtain one per PC from the AIMScribe administrator.');
 
   ConfigPage.Add('Backend URL:', False);
   ConfigPage.Add('CMED web address:', False);
-  ConfigPage.Add('Enrolment token:', False);
+  if AlreadyEnrolled() then
+    ConfigPage.Add('Enrolment token (leave empty - already enrolled):', False)
+  else
+    ConfigPage.Add('Enrolment token:', False);
 
   ConfigPage.Values[0] := '{#DefaultBackend}';
   ConfigPage.Values[1] := '{#DefaultOrigin}';
@@ -122,13 +141,18 @@ begin
     end;
     if Trim(ConfigPage.Values[2]) = '' then
     begin
-      // Allowed, because a machine may be enrolled later - but say plainly
-      // what it means rather than letting it be discovered at the bedside.
-      if MsgBox('No enrolment token was entered.' + #13#10 + #13#10 +
-                'AIMScribe will install and start, but will refuse to record ' +
-                'until this PC is enrolled. Continue anyway?',
-                mbConfirmation, MB_YESNO) = IDNO then
-        Result := False;
+      // An upgrade of an enrolled machine is the ordinary case across a fleet,
+      // and it needs no token at all. Warning here sent people hunting for a
+      // token that does not exist and cannot be reissued - the original was
+      // consumed when the PC was first set up.
+      if not AlreadyEnrolled() then
+      begin
+        if MsgBox('No enrolment token was entered.' + #13#10 + #13#10 +
+                  'AIMScribe will install and start, but will refuse to record ' +
+                  'until this PC is enrolled. Continue anyway?',
+                  mbConfirmation, MB_YESNO) = IDNO then
+          Result := False;
+      end;
     end
     else if Length(Trim(ConfigPage.Values[2])) < 20 then
     begin

@@ -231,13 +231,10 @@ async def enroll(cfg, device_key: DeviceKey, token: str, *, ssl_context=None) ->
     device_token = data.get("device_token")
     if not device_id or not hospital_id:
         raise EnrollmentError("enrollment response did not include device_id and hospital_id")
-    if not doctor_id:
-        # Recording without a doctor produces audio nobody can attribute, which
-        # is worse than recording that refused to start: the failure is silent
-        # and only discovered when someone needs the file.
-        raise EnrollmentError(
-            "enrollment response did not name a doctor. Mint the token with a "
-            "doctor_id: POST /api/v2/admin/enrollment-token")
+    # A doctor is no longer required, and is only a label for the room. The
+    # machine belongs to a clinic; the doctor sitting at it changes between
+    # shifts and CMED names them per consultation. Requiring one here meant
+    # every PC carried a name that was wrong half the day.
     if not device_token:
         raise EnrollmentError("enrollment response did not include a device token")
 

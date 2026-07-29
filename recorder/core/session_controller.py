@@ -113,9 +113,9 @@ class SessionController:
         # this machine is not enrolled and must not record.
         self.device_id: str = ""
         self.hospital_id: str = ""
-        # The machine's usual doctor, from the enrolment. Only a default now:
-        # a consulting room is shared, so CMED names the doctor per consultation
-        # and the backend checks that name against the hospital's register.
+        # Kept only so an old enrolment file still loads. Nothing reads it: a
+        # PC does not have a doctor, and pretending otherwise is what filed
+        # afternoon consultations under the morning shift.
         self.doctor_id: str = ""
         self.last_alert: str = ""
 
@@ -176,45 +176,59 @@ class SessionController:
         async with self._lock:
             previous_id: Optional[str] = None
 
+            # One instant for the whole handover. CMED treats consultations as
+            # contiguous - the second patient's start time is the first
+            # patient's end time - so both must be stamped from the same value.
+            # Reading the clock twice put the microphone teardown and the final
+            # segment seal in between, leaving a gap that made the two records
+            # disagree.
+            boundary = datetime.now(timezone.utc)
+
             if not self.device_id:
                 raise SessionError(
                     "This PC is not enrolled with the AIMS LAB server. Contact IT - "
                     "recordings cannot be attributed or archived until it is.")
 
-            # The hospital comes from the enrolment: a PC does not move between
-            # hospitals, so the page has no business asserting one.
+            # Who is consulting comes from CMED, every time, with no fallback.
             #
-            # The doctor does move. A consulting room is shared, and rotas change,
-            # so CMED names the doctor for each consultation and the machine's own
-            # doctor is only the default. That name is not trusted here - the
-            # backend checks it against the hospital's register at open, and
-            # refuses a doctor who is not credentialed to record there.
-            doctor_id = grant.doctor_id or self.doctor_id
+            # A consulting room runs two shifts. The morning doctors and the
+            # afternoon doctors use the same laptops, and nobody knows in advance
+            # which desk anyone will sit at. Taking the doctor from the enrolment
+            # meant an afternoon consultation was filed under whoever happened to
+            # be enrolled on that machine in the morning - silently, and in the
+            # filename.
+            #
+            # CMED knows who is on shift: doctors log in there, and it sends the
+            # doctor with the trigger. Falling back to the machine's own doctor
+            # is precisely the bug, so there is no fallback. A trigger that names
+            # nobody is refused rather than guessed at.
+            doctor_id = grant.doctor_id
             if not doctor_id:
                 raise SessionError(
-                    "No doctor is assigned to this recording. Sign in to CMED, or "
-                    "ask IT to assign a doctor to this PC - a recording nobody can "
-                    "attribute is worse than one that did not start.")
+                    "CMED did not say which doctor is seeing this patient, so the "
+                    "recording cannot be attributed. Start the consultation from "
+                    "CMED rather than starting the recorder directly.")
 
-            if grant.hospital_id and grant.hospital_id != self.hospital_id:
+            # The hospital also comes from CMED, because a doctor can be moved to
+            # another site at a day's notice. The enrolment is still what decides
+            # whether this machine may record at all - an unenrolled laptop gets
+            # nowhere - but it no longer decides the label. A disagreement is
+            # worth knowing about, so it is raised without blocking the clinic.
+            hospital_id = grant.hospital_id or self.hospital_id
+            if grant.hospital_id and self.hospital_id and grant.hospital_id != self.hospital_id:
                 self._emit("integrity_alert", {
                     "session_id": None,
                     "alert_type": "hospital_mismatch",
                     "detail": (f"device enrolled at {self.hospital_id}, "
-                               f"grant asserts {grant.hospital_id}"),
+                               f"CMED says {grant.hospital_id}"),
                 })
-            if self.doctor_id and doctor_id != self.doctor_id:
-                # Not an error - this is the rota working. Logged so a room whose
-                # regular doctor never records can be spotted and re-assigned.
-                logger.info("Session opening for %s on a PC assigned to %s",
-                            self._pseudonym(doctor_id), self._pseudonym(self.doctor_id))
 
             if self._active is not None:
                 # A doctor opening a different patient means the previous
                 # consultation is over. Close it properly rather than abandoning it.
                 previous_id = self._active.session_id
                 logger.info("Closing session %s before opening a new one", previous_id)
-                await self._close_active(reason="superseded_by_new_patient")
+                await self._close_active(reason="superseded_by_new_patient", at=boundary)
 
             if not self._spool.has_capacity(self.cfg.audio.bytes_per_second * 240):
                 raise SessionError(
@@ -225,7 +239,7 @@ class SessionController:
                 device_key=self._device_key,
                 device_id=self.device_id,
                 doctor_id=doctor_id,
-                hospital_id=self.hospital_id,
+                hospital_id=hospital_id,
                 patient_ref=grant.patient_ref,
                 consent_method=grant.consent_method,
                 audio={
@@ -256,7 +270,7 @@ class SessionController:
                 on_error=self._on_capture_error,
             )
 
-            opened_at = datetime.now(timezone.utc)
+            opened_at = boundary
             segmenter.start(opened_at)
             try:
                 recorder.start()
@@ -352,14 +366,14 @@ class SessionController:
             entry = active.spool.append_chain_entry("pause", crypto.pause_payload(
                 reason=reason,
                 reason_detail=reason_detail,
-                authorised_by=authorised_by or active.doctor_id or self.doctor_id,
+                authorised_by=authorised_by or active.doctor_id,
                 supervisor_required=supervisor_required,
                 at=now,
             ))
             active.pause = PauseRecord(
                 reason=reason,
                 reason_detail=reason_detail,
-                authorised_by=authorised_by or active.doctor_id or self.doctor_id,
+                authorised_by=authorised_by or active.doctor_id,
                 supervisor_required=supervisor_required,
                 started_at=now,
                 started_monotonic=time.monotonic(),
@@ -444,7 +458,8 @@ class SessionController:
                 return {"status": "not_recording", "session_id": None}
             return await self._close_active(reason=reason)
 
-    async def _close_active(self, *, reason: str) -> Dict[str, Any]:
+    async def _close_active(self, *, reason: str,
+                            at: Optional[datetime] = None) -> Dict[str, Any]:
         active = self._active
         assert active is not None
         self.state = CLOSING
@@ -474,6 +489,7 @@ class SessionController:
             duration_seconds=active.audio_seconds,
             paused_seconds=active.paused_seconds,
             reason=reason,
+            at=at,
         )
         verdict = active.spool.verify_chain()
         if not verdict.ok:
@@ -682,7 +698,7 @@ class SessionController:
             "patient_name": active.patient_name if active else None,
             # Reported even with no session running, so the dashboard can
             # show who this machine is enrolled to before recording starts.
-            "doctor_id": (active.doctor_id if active else "") or self.doctor_id or None,
+            "doctor_id": (active.doctor_id if active else None) or None,
             "hospital_id": self.hospital_id or None,
             "started_at": crypto.iso_utc(active.opened_at) if active else None,
             "segment_count": len(active.spool.segments) if active else 0,

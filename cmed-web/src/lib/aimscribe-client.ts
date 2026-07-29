@@ -149,7 +149,8 @@ export class AimscribeClient {
   async start(options: {
     patientRef: string;
     patientName?: string;
-    doctorId?: string;
+    doctorId: string;
+    hospitalId?: string;
     consentObtained: boolean;
     consentMethod?: string;
   }): Promise<any> {
@@ -162,7 +163,8 @@ export class AimscribeClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         patient_ref: options.patientRef,
-        doctor_id: options.doctorId ?? '',
+        doctor_id: options.doctorId,
+        hospital_id: options.hospitalId ?? '',
         consent_obtained: options.consentObtained,
         consent_method: options.consentMethod ?? 'verbal_at_reception',
       }),

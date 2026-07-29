@@ -236,32 +236,20 @@ class WebSocketManager:
 
     async def _doctors(self, message: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Who may record on this PC, for the page's doctor selector.
+        Doctors seen at this hospital before, as typing suggestions only.
 
-        The consulting room is shared and the doctor changes, so the page has to
-        name one - but it names it from this list, not from free text, and the
-        backend checks the choice again when the session opens. The list is
-        fetched by the agent because the device token that authorises the
-        request must not reach a browser.
+        Not a permission list. CMED decides who is consulting - doctors log in
+        there and it knows the rota - so a name missing from this list is no
+        reason to refuse a recording. An empty list is perfectly normal at a new
+        site and must never block the clinic.
         """
         register = None
         if self._uploader is not None and self._hospital_id:
             register = await self._uploader.fetch_doctors(self._hospital_id)
 
-        assigned = self._controller.doctor_id if self._controller else ""
-        if not register and assigned:
-            # The register is unreachable - the backend is down, or this agent is
-            # talking to one that predates it. Offer the machine's own doctor
-            # rather than an empty list: a consulting room that cannot record
-            # because a web request failed is a worse outcome than one that
-            # records under its usual doctor.
-            register = [{"doctor_id": assigned, "full_name": assigned}]
-
         return self._ack("doctors", {
             "hospital_id": self._hospital_id or None,
-            # The machine's usual doctor, pre-selected so the common case stays
-            # one click.
-            "assigned_doctor_id": assigned or None,
+            # Deliberately absent: the machine has no doctor.
             "doctors": register or [],
         })
 

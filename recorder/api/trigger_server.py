@@ -331,9 +331,9 @@ def create_app(runtime: Runtime) -> FastAPI:
         register = await runtime.uploader.fetch_doctors(hospital) if runtime.uploader else None
         return {"success": True, "data": {
             "hospital_id": hospital or None,
-            # The machine's usual doctor, pre-selected so the common case is
-            # still one click.
-            "assigned_doctor_id": assigned or None,
+            # Deliberately absent: the machine has no doctor. Advertising one
+            # is what made the page pre-select it and file an afternoon
+            # consultation under the morning doctor.
             "doctors": register or [],
         }}
 

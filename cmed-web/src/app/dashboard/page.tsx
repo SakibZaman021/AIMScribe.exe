@@ -75,7 +75,10 @@ export default function DashboardPage() {
   // from the agent; the choice is remembered for the session so a doctor seeing
   // twenty patients picks their name once, not twenty times.
   const [register, setRegister] = useState<DoctorRegister | null>(null);
+  // Typed here because this stands in for CMED. On the real site these arrive
+  // with the trigger from the doctor's own login, and are never chosen by hand.
   const [doctorId, setDoctorId] = useState('');
+  const [hospitalId, setHospitalId] = useState('');
   const [showPause, setShowPause] = useState(false);
   // Explicitly widened: PAUSE_REASONS is `as const`, so inference would pin this
   // to the first literal and reject every other reason.
@@ -285,13 +288,14 @@ export default function DashboardPage() {
       if (!consentGiven) {
         throw new Error('Confirm the patient has agreed to be recorded before starting.');
       }
-      if (!doctorId) {
-        throw new Error('Choose which doctor is seeing this patient.');
+      if (!doctorId.trim()) {
+        throw new Error('Enter the doctor ID, as CMED would send it.');
       }
       await clientRef.current!.start({
         patientRef: patientData.patient_id,
         patientName: patientData.patient_name,
         doctorId,
+        hospitalId,
         consentObtained: true,
         consentMethod: 'verbal_at_reception',
       });
@@ -601,32 +605,40 @@ export default function DashboardPage() {
                 </div>
 
                 {!status?.isRecording && (
-                  <div className="mt-3">
-                    <label className="text-sm font-medium text-gray-700">
-                      Doctor seeing this patient
-                    </label>
-                    {register && register.doctors.length > 0 ? (
-                      <select
-                        value={doctorId}
-                        onChange={(e) => setDoctorId(e.target.value)}
-                        className="mt-1 w-full border rounded-lg px-3 py-2 text-sm text-gray-800"
-                      >
-                        <option value="">Choose a doctor…</option>
-                        {register.doctors.map((d) => (
-                          <option key={d.doctorId} value={d.doctorId}>
-                            {d.fullName === d.doctorId ? d.doctorId : `${d.fullName} (${d.doctorId})`}
-                          </option>
-                        ))}
-                      </select>
-                    ) : (
-                      <div className="mt-1 text-sm text-gray-500">
-                        {!connected
-                          ? 'waiting for AIMScribe on this PC…'
-                          : register
-                            ? 'No doctors are registered at this hospital yet — contact IT.'
-                            : 'loading…'}
-                      </div>
-                    )}
+                  <div className="mt-3 space-y-2">
+                    <p className="text-xs text-gray-500">
+                      On the real CMED site these arrive with the trigger, from the
+                      doctor&apos;s own login. Typed here so the pipeline can be tested
+                      with any doctor at any hospital.
+                    </p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <label className="text-sm text-gray-700">
+                        Doctor ID
+                        <input
+                          value={doctorId}
+                          onChange={(e) => setDoctorId(e.target.value.trim())}
+                          placeholder="DR003"
+                          list="known-doctors"
+                          className="mt-1 w-full border rounded-lg px-3 py-2 text-sm text-gray-800"
+                        />
+                      </label>
+                      <label className="text-sm text-gray-700">
+                        Hospital ID
+                        <input
+                          value={hospitalId}
+                          onChange={(e) => setHospitalId(e.target.value.trim())}
+                          placeholder={status?.hospitalId ?? 'HOSP001'}
+                          className="mt-1 w-full border rounded-lg px-3 py-2 text-sm text-gray-800"
+                        />
+                      </label>
+                    </div>
+                    {/* Suggestions only. Anything may be typed, because CMED is
+                        the authority on who is on shift and where. */}
+                    <datalist id="known-doctors">
+                      {(register?.doctors ?? []).map((d) => (
+                        <option key={d.doctorId} value={d.doctorId} />
+                      ))}
+                    </datalist>
                   </div>
                 )}
               </div>
@@ -663,7 +675,7 @@ export default function DashboardPage() {
                       }`}
                     >
                       {!connected ? 'Waiting for AIMScribe…'
-                        : !doctorId ? 'Choose the doctor to continue'
+                        : !doctorId ? 'Enter the doctor ID to continue'
                         : !consentGiven ? 'Confirm consent to continue'
                         : recordingOtherPatient ? 'Start (stops previous patient)'
                         : 'Start Consultation'}
