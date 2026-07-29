@@ -16,7 +16,7 @@
 ; ============================================================
 
 #define AppName        "AIMScribe Agent"
-#define AppVersion     "2.1.0"
+#define AppVersion     "2.1.1"
 #define AppPublisher   "AIMS LAB"
 #define AppExe         "AIMScribe_Agent.exe"
 
@@ -227,31 +227,81 @@ begin
   end;
 end;
 
+procedure Append(var Lines: TArrayOfString; const Line: String);
+begin
+  SetArrayLength(Lines, GetArrayLength(Lines) + 1);
+  Lines[GetArrayLength(Lines) - 1] := Line;
+end;
+
 procedure RegisterLogonTask();
 var
   ResultCode: Integer;
-  Cmd: String;
+  Xml: TArrayOfString;
+  XmlPath: String;
 begin
   { A logon task, not a service. Audio capture needs the user's session: a
     session 0 service has no default audio endpoint and would record silence.
-    /RL HIGHEST so it can read its own configuration under Program Files. }
+
+    Defined by XML rather than by schtasks flags, because the two settings that
+    matter most have no flags and default to the wrong value on a laptop:
+
+      DisallowStartIfOnBatteries  defaults True - the agent then never starts at
+                                  logon on an unplugged laptop, and schtasks
+                                  still reports success. This cost an evening to
+                                  find on a machine sitting at 19% battery.
+      StopIfGoingOnBatteries      defaults True - Windows would kill the agent
+                                  mid-consultation the moment someone unplugged
+                                  the trolley.
+
+    Doctors' machines are laptops and they are not always plugged in. }
+
+  XmlPath := ExpandConstant('{tmp}\aimscribe_task.xml');
+  SetArrayLength(Xml, 0);
+    { No encoding declaration, and saved without a byte-order mark below.
+      schtasks parses the first two bytes literally: a BOM, or a declaration
+      that disagrees with the actual encoding, fails with nothing more useful
+      than "(1,2): incorrect document syntax". }
+  Append(Xml, '<?xml version="1.0"?>');
+  Append(Xml, '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">');
+  Append(Xml, '  <RegistrationInfo>');
+  Append(Xml, '    <Description>Starts the AIMScribe recording agent at logon.</Description>');
+  Append(Xml, '  </RegistrationInfo>');
+  Append(Xml, '  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>');
+  Append(Xml, '  <Principals><Principal id="Author">');
+  Append(Xml, '    <GroupId>S-1-5-32-545</GroupId>');
+  Append(Xml, '    <RunLevel>HighestAvailable</RunLevel>');
+  Append(Xml, '  </Principal></Principals>');
+  Append(Xml, '  <Settings>');
+  Append(Xml, '    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>');
+  Append(Xml, '    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>');
+  Append(Xml, '    <AllowHardTerminate>false</AllowHardTerminate>');
+  Append(Xml, '    <StartWhenAvailable>true</StartWhenAvailable>');
+  Append(Xml, '    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>');
+  Append(Xml, '    <IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd></IdleSettings>');
+  Append(Xml, '    <AllowStartOnDemand>true</AllowStartOnDemand>');
+  Append(Xml, '    <Enabled>true</Enabled>');
+  Append(Xml, '    <Hidden>false</Hidden>');
+  Append(Xml, '    <RunOnlyIfIdle>false</RunOnlyIfIdle>');
+    { A consultation can outlast any limit worth setting, and the agent is meant
+      to run all day. }
+  Append(Xml, '    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>');
+  Append(Xml, '    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>');
+  Append(Xml, '  </Settings>');
+  Append(Xml, '  <Actions Context="Author"><Exec>');
+  Append(Xml, '    <Command>"' + ExpandConstant('{app}\{#AppExe}') + '"</Command>');
+  Append(Xml, '  </Exec></Actions>');
+  Append(Xml, '</Task>');
+  SaveStringsToUTF8FileWithoutBOM(XmlPath, Xml, False);
+
   Exec('schtasks.exe', '/Delete /TN "AIMScribe Agent" /F', '',
        SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-  Cmd := '/Create /TN "AIMScribe Agent" /TR "\"' + ExpandConstant('{app}\{#AppExe}') +
-         '\"" /SC ONLOGON /RL HIGHEST /F';
-
   { Three ways this goes wrong, and all three used to end with Setup reporting
     success: schtasks not launching, schtasks failing, and schtasks reporting
-    success while creating nothing. The last one is not hypothetical - it is
-    what happened on the first machine, and the PC then installed cleanly,
-    started nothing at logon, and was discovered by a doctor with a patient in
-    front of them.
-
-    So the task is verified by querying for it, and a failure aborts the
-    install. A machine that half-installed is worse than one that plainly did
-    not: the second gets fixed, the first gets used. }
-  if not Exec('schtasks.exe', Cmd, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    success while creating nothing. A machine that half-installed is worse than
+    one that plainly did not: the second gets fixed, the first gets used. }
+  if not Exec('schtasks.exe', '/Create /TN "AIMScribe Agent" /XML "' + XmlPath + '" /F',
+              '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
     RaiseException('Could not run schtasks.exe to register the startup task.' + #13#10 +
                    'AIMScribe has not been installed.');
 

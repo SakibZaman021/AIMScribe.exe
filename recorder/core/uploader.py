@@ -98,6 +98,9 @@ class UploadManager:
         # offers no client certificates, so this is the transport identity.
         self._device_token: Optional[str] = None
         self._doctors_cache: Optional[List[Dict[str, Any]]] = None
+        # Sessions already reported as unable to complete, so the
+        # warning is raised once rather than on every tick.
+        self._reported_quarantines: set = set()
 
         self._sessions: List[SessionSpool] = []
         self._http: Optional[aiohttp.ClientSession] = None
@@ -239,6 +242,27 @@ class UploadManager:
             # A session closed while the backend was unreachable still needs its
             # close delivered, or it would sit in 'open' forever and never be
             # archived. Retried here once every segment has landed.
+            # A session holding a quarantined segment can never close: the
+            # backend is missing that entry and will report the session
+            # incomplete forever. Retrying every tick achieved nothing except a
+            # request every fifteen seconds for the life of the agent. Say so
+            # once and leave it for a human - the audio stays on disk either way,
+            # and is never purged without a receipt.
+            if session.quarantined_segments():
+                if session.session_id not in self._reported_quarantines:
+                    self._reported_quarantines.add(session.session_id)
+                    seqs = [s.seq_no for s in session.quarantined_segments()]
+                    logger.critical(
+                        "Session %s cannot be completed: segment(s) %s were "
+                        "rejected. Its audio is kept and will not be purged.",
+                        session.session_id, seqs)
+                    self._emit("integrity_alert", {
+                        "session_id": session.session_id,
+                        "alert_type": "session_needs_review",
+                        "detail": f"quarantined segment(s) {seqs}; close cannot complete",
+                    })
+                continue
+
             if (session.closed_at is not None
                     and not session.close_reported
                     and not session.pending_segments()

@@ -429,6 +429,11 @@ class SessionSpool:
                 f"segment {seq_no} of {self.session_id} does not match its recorded hash")
         return audio
 
+    def quarantined_segments(self) -> List[SpoolSegment]:
+        """Segments the backend or a local hash check rejected."""
+        return [s for s in sorted(self.segments.values(), key=lambda x: x.seq_no)
+                if s.state == QUARANTINED]
+
     def pending_segments(self) -> List[SpoolSegment]:
         return [s for s in sorted(self.segments.values(), key=lambda x: x.seq_no)
                 if s.state == PENDING]
