@@ -207,6 +207,31 @@ class UploadManager:
                     # on the next tick. This is the normal outage path.
                     continue
 
+            # A rejected clip stops this session dead, before anything else is
+            # sent. It used to only stop the close, which was far too late:
+            # quarantined segments drop out of the pending list, so the loop
+            # sailed past the gap and uploaded the clips after it. Those arrived
+            # with a prev_hash the backend could not follow, turning one rejected
+            # clip into a broken chain.
+            #
+            # Nothing is lost by stopping. The audio stays sealed on disk and is
+            # never purged without a receipt; it needs a human, not another
+            # request every ten seconds.
+            if session.quarantined_segments():
+                if session.session_id not in self._reported_quarantines:
+                    self._reported_quarantines.add(session.session_id)
+                    seqs = [s.seq_no for s in session.quarantined_segments()]
+                    logger.critical(
+                        "Session %s cannot be completed: segment(s) %s were "
+                        "rejected. Its audio is kept and will not be purged.",
+                        session.session_id, seqs)
+                    self._emit("integrity_alert", {
+                        "session_id": session.session_id,
+                        "alert_type": "session_needs_review",
+                        "detail": f"quarantined segment(s) {seqs}; close cannot complete",
+                    })
+                continue
+
             # Strictly in chain order, and stop at the first failure.
             #
             # The chain is sequential: every entry's prev_hash is the previous
@@ -242,26 +267,6 @@ class UploadManager:
             # A session closed while the backend was unreachable still needs its
             # close delivered, or it would sit in 'open' forever and never be
             # archived. Retried here once every segment has landed.
-            # A session holding a quarantined segment can never close: the
-            # backend is missing that entry and will report the session
-            # incomplete forever. Retrying every tick achieved nothing except a
-            # request every fifteen seconds for the life of the agent. Say so
-            # once and leave it for a human - the audio stays on disk either way,
-            # and is never purged without a receipt.
-            if session.quarantined_segments():
-                if session.session_id not in self._reported_quarantines:
-                    self._reported_quarantines.add(session.session_id)
-                    seqs = [s.seq_no for s in session.quarantined_segments()]
-                    logger.critical(
-                        "Session %s cannot be completed: segment(s) %s were "
-                        "rejected. Its audio is kept and will not be purged.",
-                        session.session_id, seqs)
-                    self._emit("integrity_alert", {
-                        "session_id": session.session_id,
-                        "alert_type": "session_needs_review",
-                        "detail": f"quarantined segment(s) {seqs}; close cannot complete",
-                    })
-                continue
 
             if (session.closed_at is not None
                     and not session.close_reported
