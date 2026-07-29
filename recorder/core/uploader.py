@@ -408,11 +408,22 @@ class UploadManager:
         invalidates every entry recorded after it.
         """
         endpoint = "/session/pause" if entry.entry_type == "pause" else "/session/resume"
-        if await self._post(endpoint, {
+        result = await self._post(endpoint, {
             "session_id": session.session_id,
             "chain_entry": entry.to_wire(),
-        }, attempts=1) is None:
+        }, attempts=1)
+        if result is None:
             return False
+
+        # The backend answers 200 with "deferred" when the entry does not follow
+        # its stored head - it is holding the door open, not accepting the entry.
+        # Treating that as delivered marked three real entries as sent, so they
+        # were never retried and the session stayed broken.
+        if result.get("status") != "recorded":
+            logger.info("Entry %s of %s deferred by the backend: %s",
+                        entry.entry_no, session.session_id, result.get("reason", ""))
+            return False
+
         session.mark_entry_reported(entry.entry_no)
         return True
 
