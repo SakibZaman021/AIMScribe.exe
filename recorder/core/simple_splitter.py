@@ -51,6 +51,27 @@ except ImportError:  # pragma: no cover
         return (total / len(samples)) ** 0.5
 
 
+def _zero_crossing_rate(fragment: bytes) -> float:
+    """
+    How often the waveform changes sign, per sample.
+
+    Unvoiced fricatives - the s, sh, f and th sounds - carry little energy but
+    cross zero constantly. Judging on loudness alone, they look like silence,
+    which is exactly how a cut lands in the middle of "diabetes".
+    """
+    samples = array("h")
+    samples.frombytes(fragment[: len(fragment) - (len(fragment) % 2)])
+    if len(samples) < 2:
+        return 0.0
+    crossings = 0
+    previous = samples[0]
+    for value in samples:
+        if (value >= 0) != (previous >= 0):
+            crossings += 1
+        previous = value
+    return crossings / (len(samples) - 1)
+
+
 @dataclass(frozen=True)
 class SealedSegment:
     """What the segmenter hands back for spooling."""
@@ -86,6 +107,7 @@ class Segmenter:
         sample_width: int,
         min_seconds: float,
         max_seconds: float,
+        grace_seconds: float = 0.0,
         silence_rms: int,
         silence_hold_seconds: float,
         on_segment: Callable[[SealedSegment], None],
@@ -95,9 +117,47 @@ class Segmenter:
         self.sample_width = sample_width
         self.min_bytes = int(min_seconds * self.bytes_per_second)
         self.max_bytes = int(max_seconds * self.bytes_per_second)
+        # The absolute ceiling. Between max and this, the clip is over its
+        # target length but still being given a chance to end on a quiet patch
+        # rather than in the middle of a word.
+        self.hard_bytes = int((max_seconds + grace_seconds) * self.bytes_per_second)
+        # `silence_rms` is now a floor rather than the whole test. A fixed
+        # threshold cannot work across a quiet consulting room and one with a
+        # fan and a corridor outside: set low, the noisy room never cuts and
+        # every clip is forced mid-word; set high, the quiet room cuts between
+        # syllables. The live threshold tracks the room and never drops below
+        # this.
         self.silence_rms = silence_rms
         self.silence_hold_bytes = int(silence_hold_seconds * self.bytes_per_second)
         self._on_segment = on_segment
+
+        # 20 ms is short enough to place a cut precisely inside a gap, long
+        # enough for the loudness and zero-crossing figures to mean something.
+        self.frame_bytes = max(1, int(0.020 * self.bytes_per_second))
+        self.frame_bytes -= self.frame_bytes % max(1, sample_width)
+        # A pause between words runs 50-200 ms; between sentences, 300-800 ms.
+        # Anything shorter than the hold is speech taking a breath.
+        self.noise_floor = float(silence_rms)
+        # The floor is learned by watching for the quietest moment in each short
+        # window and keeping the smallest of the last few. Learning only from
+        # frames already judged quiet cannot work: in a room noisier than the
+        # starting guess, nothing is ever judged quiet, so the estimate never
+        # rises and every clip is forced at the ceiling.
+        self._window_bytes = int(0.5 * self.bytes_per_second)
+        self._window_seen = 0
+        self._window_min = float("inf")
+        self._recent_minima: list = []
+        # An exponential average of speech, used to cap the floor. Without it,
+        # a doctor who never pauses would teach the floor that speech is the
+        # background, and the segmenter would start cutting inside words.
+        self._speech_level = 0.0
+        # Fricatives sit well above the room but well below a vowel, so a
+        # threshold a few times the floor keeps them on the speech side.
+        self.silence_ratio = 3.0
+        self.fricative_zcr = 0.18
+        # When a cut is forced, look back this far for the quietest moment
+        # rather than slicing wherever the clip happened to reach.
+        self.lookback_bytes = int(2.0 * self.bytes_per_second)
 
         self._queue: "queue.Queue" = queue.Queue(maxsize=queue_depth)
         self._thread: Optional[threading.Thread] = None
@@ -109,6 +169,11 @@ class Segmenter:
         self._rms_weighted_sum = 0.0
         self._rms_samples = 0
         self._segment_started_at: Optional[datetime] = None
+        # (end_offset, rms, is_speech) for every 20 ms of the clip so far, and
+        # how much of the buffer has been analysed.
+        self._frames: list = []
+        self._framed_bytes = 0
+        self._silence_started_at_offset: Optional[int] = None
 
         self.segments_emitted = 0
         self.dropped_chunks = 0
@@ -199,45 +264,165 @@ class Segmenter:
         self._rms_weighted_sum += level * len(chunk)
         self._rms_samples += len(chunk)
 
+        self._analyse_new_frames()
         size = len(self._buffer)
 
         # Below the minimum, keep accumulating regardless of how quiet it is.
+        # Otherwise a cough in the first seconds produces a one-second clip.
         if size < self.min_bytes:
             self._silence_bytes = 0
+            self._silence_started_at_offset = None
             return
 
-        # Hard cutoff so a continuous talker still produces regular clips.
-        if size >= self.max_bytes:
-            logger.debug("Segment reached maximum length; forcing a cut")
-            self._seal(is_final=False)
+        # A sustained pause, and past the minimum: cut in the middle of it, so
+        # neither clip begins or ends against a word.
+        if (self._silence_bytes >= self.silence_hold_bytes
+                and self._silence_started_at_offset is not None):
+            middle = self._silence_started_at_offset + self._silence_bytes // 2
+            logger.debug("Pause at %.1f s; cutting inside it at %.1f s",
+                         size / self.bytes_per_second, middle / self.bytes_per_second)
+            self._seal(is_final=False, cut_at=middle)
             return
 
-        # Inside the window, cut on a sustained quiet patch.
-        if level < self.silence_rms:
-            self._silence_bytes += len(chunk)
-            if self._silence_bytes >= self.silence_hold_bytes:
-                logger.debug("Silence boundary at %.1f s; cutting",
-                             size / self.bytes_per_second)
-                self._seal(is_final=False)
-        else:
-            self._silence_bytes = 0
+        # Out of grace. The clip has to end, but not just anywhere: the quietest
+        # moment in the last couple of seconds is far more likely to be a gap
+        # between words than the arbitrary point the ceiling falls on.
+        if size >= self.hard_bytes:
+            cut = self._quietest_offset_near_end()
+            logger.debug("Segment reached its ceiling at %.1f s; cutting at the "
+                         "quietest point, %.1f s",
+                         size / self.bytes_per_second,
+                         (cut or size) / self.bytes_per_second)
+            self._seal(is_final=False, cut_at=cut)
 
-    def _seal(self, *, is_final: bool) -> None:
+    # ---- listening ----
+
+    def _analyse_new_frames(self) -> None:
+        """
+        Walk the newly arrived audio one 20 ms frame at a time.
+
+        Chunks do not arrive in tidy multiples, so this consumes whole frames
+        and leaves the remainder for the next chunk.
+        """
+        while len(self._buffer) - self._framed_bytes >= self.frame_bytes:
+            start = self._framed_bytes
+            frame = bytes(self._buffer[start:start + self.frame_bytes])
+            self._framed_bytes += self.frame_bytes
+
+            level = _rms(frame, self.sample_width)
+
+            # Judge against the floor as it stands, then let the result decide
+            # how the floor moves. Updating first let speech drag the estimate
+            # up - fifty frames a second, so "slowly" was nothing of the sort -
+            # until the threshold sat above a fricative and the guard below
+            # stopped firing.
+            threshold = max(float(self.silence_rms), self.noise_floor * self.silence_ratio)
+            quiet = level < threshold
+
+            # Quiet by loudness, but crossing zero on nearly every sample: an
+            # unvoiced consonant, not a gap. Cutting here splits the word that
+            # owns it. Judged against the absolute floor rather than the running
+            # estimate, so it holds even when the room is loud.
+            if quiet and level > self.silence_rms and                     _zero_crossing_rate(frame) >= self.fricative_zcr:
+                quiet = False
+
+            if not quiet:
+                self._speech_level = (0.95 * self._speech_level + 0.05 * level
+                                      if self._speech_level else level)
+
+            self._window_min = min(self._window_min, level)
+            self._window_seen += self.frame_bytes
+            if self._window_seen >= self._window_bytes:
+                self._recent_minima.append(self._window_min)
+                del self._recent_minima[:-4]        # about two seconds of history
+                self._window_seen = 0
+                self._window_min = float("inf")
+
+                # The quietest moment in the last two seconds is the room. Two
+                # seconds of history means one window of unbroken speech cannot
+                # move it - a real pause has to be absent throughout.
+                candidate = min(self._recent_minima)
+                # ...and even then, the floor may never climb into the range
+                # where speech itself would read as silence.
+                if self._speech_level:
+                    candidate = min(candidate, self._speech_level * 0.25)
+                self.noise_floor = max(float(self.silence_rms), candidate)
+
+            self._frames.append((self._framed_bytes, level, not quiet))
+
+            if quiet:
+                if self._silence_started_at_offset is None:
+                    self._silence_started_at_offset = start
+                self._silence_bytes += self.frame_bytes
+            else:
+                self._silence_bytes = 0
+                self._silence_started_at_offset = None
+
+    def _quietest_offset_near_end(self) -> Optional[int]:
+        """
+        The end of the quietest frame in the recent past, if there is a real dip.
+
+        Used only when a cut is forced. Backing off to a quieter moment is worth
+        a little clip length, but only when that moment is genuinely quieter:
+        against steady speech every frame measures much the same, and picking
+        the "quietest" of those would just cut early for no benefit - and, with
+        ties, as early as the window allows.
+
+        Returns None when the recent audio is uniformly loud, and the caller
+        then cuts at the ceiling as before.
+        """
+        earliest = len(self._buffer) - self.lookback_bytes
+        window = [(offset, rms) for offset, rms, _ in self._frames
+                  if offset >= earliest and offset >= self.min_bytes]
+        if len(window) < 3:
+            return None
+
+        levels = sorted(rms for _, rms in window)
+        median = levels[len(levels) // 2]
+        quietest = levels[0]
+        if quietest > median * 0.6:
+            return None                       # no real dip to aim for
+
+        # Among the dips, take the latest: it keeps the clip closest to its
+        # target length, and a later gap is as good a place to cut as an
+        # earlier one.
+        ceiling = quietest * 1.2
+        return max(offset for offset, rms in window if rms <= ceiling)
+
+    def _seal(self, *, is_final: bool, cut_at: Optional[int] = None) -> None:
+        """
+        Emit the clip, optionally cutting at a chosen point.
+
+        `cut_at` is a byte offset inside the buffer. Everything after it stays
+        and becomes the beginning of the next clip, which is what allows a cut
+        to land in the middle of a pause instead of at whatever moment the
+        buffer happened to reach.
+        """
         if not self._buffer:
             # A flush with nothing buffered is normal (pause immediately after a cut).
             if is_final:
                 logger.debug("Final flush with an empty buffer; nothing to seal")
             return
 
-        pcm = bytes(self._buffer)
+        # Whole samples only: cutting mid-sample would put a click at the join.
+        if cut_at is not None:
+            cut_at -= cut_at % self.sample_width
+            cut_at = max(self.sample_width, min(cut_at, len(self._buffer)))
+        split = cut_at if cut_at is not None else len(self._buffer)
+
+        pcm = bytes(self._buffer[:split])
+        remainder = bytearray(self._buffer[split:])
         started = self._segment_started_at or datetime.now(timezone.utc)
         ended = started + timedelta(seconds=len(pcm) / self.bytes_per_second)
         mean_rms = (self._rms_weighted_sum / self._rms_samples) if self._rms_samples else 0.0
 
         # Reset before the callback: sealing writes to disk and could raise, and a
         # retry must not re-emit audio that is already accounted for in the chain.
-        self._buffer = bytearray()
+        self._buffer = remainder
         self._silence_bytes = 0
+        self._silence_started_at_offset = None
+        self._frames = []
+        self._framed_bytes = 0
         self._rms_weighted_sum = 0.0
         self._rms_samples = 0
         self._segment_started_at = ended

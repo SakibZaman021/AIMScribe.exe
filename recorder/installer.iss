@@ -204,8 +204,14 @@ begin
     Env.Add('AIMS_SAMPLE_WIDTH=2');
     Env.Add('AIMS_FRAMES_PER_BUFFER=2048');
     Env.Add('');
-    Env.Add('AIMS_SEGMENT_MIN_SECONDS=170');
-    Env.Add('AIMS_SEGMENT_MAX_SECONDS=190');
+    Env.Add('# A clip is the unit of upload, retry and loss. Short clips mean');
+    Env.Add('# a failure risks a minute, not three, and transcripts arrive while');
+    Env.Add('# the doctor is still talking. The server merges them back.');
+    Env.Add('AIMS_SEGMENT_MIN_SECONDS=30');
+    Env.Add('AIMS_SEGMENT_MAX_SECONDS=60');
+    Env.Add('# Keep listening this much longer for a natural pause before');
+    Env.Add('# cutting a talker mid-sentence.');
+    Env.Add('AIMS_SEGMENT_GRACE_SECONDS=10');
     Env.Add('');
     Env.Add('AIMS_SPOOL_DIR=' + DataDir + '\spool');
     Env.Add('# 40 GB is about three weeks of backend downtime at 44.1 kHz.');

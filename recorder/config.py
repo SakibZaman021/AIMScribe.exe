@@ -136,9 +136,23 @@ class AudioConfig:
 
 @dataclass(frozen=True)
 class SegmentConfig:
-    """Clip boundaries. A clip closes on silence inside the window, or is forced at max."""
-    min_seconds: float = 170.0
-    max_seconds: float = 190.0
+    """
+    Clip boundaries. A clip closes on a quiet patch inside the window, and is
+    forced once even the grace period has passed.
+
+    Short clips, because the server merges them back into one consultation file
+    anyway, so nothing is lost by cutting often - and a great deal is gained. A
+    clip is the unit of upload, retry and loss: at three minutes, a failure put
+    three minutes of a consultation at risk and held the rest of the session
+    behind it. At a minute, the exposure is a minute, transcripts start arriving
+    while the doctor is still talking, and a poor connection recovers in smaller
+    steps.
+    """
+    min_seconds: float = 30.0
+    max_seconds: float = 60.0
+    # Speech rarely stops on cue. Rather than cut a talker mid-sentence at the
+    # maximum, keep listening this much longer for somewhere natural to cut.
+    grace_seconds: float = 10.0
     silence_rms: int = 320          # linear RMS, 0-32767; ~-40 dBFS
     silence_hold_seconds: float = 1.0
 
@@ -272,8 +286,9 @@ class Config:
         )
 
         segment = SegmentConfig(
-            min_seconds=_float("AIMS_SEGMENT_MIN_SECONDS", 170.0),
-            max_seconds=_float("AIMS_SEGMENT_MAX_SECONDS", 190.0),
+            min_seconds=_float("AIMS_SEGMENT_MIN_SECONDS", 30.0),
+            max_seconds=_float("AIMS_SEGMENT_MAX_SECONDS", 60.0),
+            grace_seconds=_float("AIMS_SEGMENT_GRACE_SECONDS", 10.0),
             silence_rms=_int("AIMS_SILENCE_RMS", 320),
             silence_hold_seconds=_float("AIMS_SILENCE_HOLD_SECONDS", 1.0),
         )

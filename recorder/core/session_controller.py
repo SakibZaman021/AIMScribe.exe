@@ -256,6 +256,7 @@ class SessionController:
                 sample_width=self.cfg.audio.sample_width,
                 min_seconds=self.cfg.segment.min_seconds,
                 max_seconds=self.cfg.segment.max_seconds,
+                grace_seconds=self.cfg.segment.grace_seconds,
                 silence_rms=self.cfg.segment.silence_rms,
                 silence_hold_seconds=self.cfg.segment.silence_hold_seconds,
                 on_segment=self._on_segment_sealed,

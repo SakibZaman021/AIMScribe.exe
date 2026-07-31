@@ -7,6 +7,7 @@ thread only enqueues, and never blocks.
 from __future__ import annotations
 
 import queue
+from array import array
 import threading
 import time
 from datetime import datetime, timezone
@@ -205,5 +206,152 @@ def test_rms_runs_off_the_capture_thread():
         segmenter.flush(is_final=False, timeout=5)
         assert seen.get("thread") == "Segmenter"
         assert seen["thread"] != submitting
+    finally:
+        segmenter.stop(seal_remaining=False)
+
+
+
+# ============================================================
+# Where the cut lands
+#
+# Clips are short now - 30 to 60 seconds - so the segmenter cuts three times as
+# often as it used to, and every cut is a chance to slice a word in half. The
+# server stitches the clips back together, so a badly placed cut costs nothing
+# in audio; it costs a mangled word in the transcript, which is what the doctor
+# reads.
+# ============================================================
+
+def _speech(seconds: float, *, level: int = 12000, sample_rate: int = SAMPLE_RATE) -> bytes:
+    """Alternating samples: loud, and busy with zero crossings, like a vowel."""
+    frames = int(seconds * sample_rate)
+    out = array("h", [level if n % 8 < 4 else -level for n in range(frames)])
+    return out.tobytes()
+
+
+def _fricative(seconds: float, *, sample_rate: int = SAMPLE_RATE) -> bytes:
+    """
+    Quiet but crossing zero on almost every sample - an s or sh sound.
+
+    Loudness alone cannot tell this from a pause, which is how a cut ends up in
+    the middle of "diabetes".
+    """
+    frames = int(seconds * sample_rate)
+    out = array("h", [900 if n % 2 else -900 for n in range(frames)])
+    return out.tobytes()
+
+
+def _room_tone(seconds: float, *, level: int = 120, sample_rate: int = SAMPLE_RATE) -> bytes:
+    """A real room is never digitally silent: fans, corridors, mains hum."""
+    frames = int(seconds * sample_rate)
+    out = array("h", [level if (n // 37) % 2 else -level for n in range(frames)])
+    return out.tobytes()
+
+
+def _wait_for(collected, count=1, timeout=4.0):
+    deadline = time.time() + timeout
+    while len(collected) < count and time.time() < deadline:
+        time.sleep(0.05)
+    return collected
+
+
+def test_a_cut_lands_inside_the_pause_not_at_its_edges():
+    """
+    The clip should end part-way through the gap, so the words before it are
+    complete and the next clip does not open on a word already in progress.
+    """
+    collected = []
+    segmenter = _segmenter(collected, min_seconds=1.0, max_seconds=6.0,
+                           silence_hold_seconds=0.4)
+    segmenter.start(datetime.now(timezone.utc))
+    try:
+        segmenter.submit(_speech(1.5))
+        segmenter.submit(_room_tone(1.0))      # a one-second pause
+        segmenter.submit(_speech(1.0))
+        _wait_for(collected)
+        assert collected, "a one-second pause should have closed the clip"
+
+        duration = len(collected[0].pcm) / BYTES_PER_SECOND
+        # Speech ends at 1.5 s and resumes at 2.5 s. A cut inside the pause -
+        # not before it, not after the next word has begun.
+        assert 1.5 < duration < 2.5, f"cut at {duration:.2f}s, outside the pause"
+    finally:
+        segmenter.stop(seal_remaining=False)
+
+
+def test_a_fricative_is_not_mistaken_for_a_pause():
+    """An s sound is quiet. Cutting there would split the word that owns it."""
+    collected = []
+    segmenter = _segmenter(collected, min_seconds=0.5, max_seconds=6.0,
+                           silence_hold_seconds=0.3)
+    segmenter.start(datetime.now(timezone.utc))
+    try:
+        segmenter.submit(_speech(0.8))
+        segmenter.submit(_fricative(0.6))      # longer than the hold, but speech
+        segmenter.submit(_speech(0.8))
+        time.sleep(0.6)
+        assert not collected, "cut during a fricative - that splits a word"
+    finally:
+        segmenter.stop(seal_remaining=False)
+
+
+def test_room_noise_does_not_stop_the_segmenter_finding_pauses():
+    """
+    A fixed threshold set for a quiet room never fires in a noisy one, so every
+    clip is forced at the ceiling and every cut is arbitrary. The threshold
+    follows the room instead.
+    """
+    collected = []
+    segmenter = _segmenter(collected, min_seconds=1.0, max_seconds=8.0,
+                           silence_hold_seconds=0.4, silence_rms=60)
+    segmenter.start(datetime.now(timezone.utc))
+    try:
+        segmenter.submit(_room_tone(1.0, level=900))   # noisy background
+        segmenter.submit(_speech(1.0))
+        segmenter.submit(_room_tone(1.2, level=900))   # a pause, still noisy
+        segmenter.submit(_speech(0.5))
+        _wait_for(collected)
+        assert collected, "a pause in a noisy room is still a pause"
+    finally:
+        segmenter.stop(seal_remaining=False)
+
+
+def test_unbroken_speech_never_teaches_the_floor_that_speech_is_silence():
+    """
+    The floor is learned from the quietest moment in the recent past. A doctor
+    who talks for a minute without pausing offers no quiet moments at all, and
+    a naive estimator would settle on the speech itself - after which every
+    frame reads as silence and the segmenter cuts wherever it likes, inside
+    words.
+    """
+    collected = []
+    segmenter = _segmenter(collected, min_seconds=1.0, max_seconds=30.0,
+                           silence_hold_seconds=0.4)
+    segmenter.start(datetime.now(timezone.utc))
+    try:
+        for _ in range(12):
+            segmenter.submit(_speech(1.0))       # twelve seconds, no gap
+        time.sleep(0.8)
+        assert not collected, "cut during unbroken speech - that splits a word"
+        # The floor may have crept up, but nowhere near speech.
+        assert segmenter.noise_floor < 12000 * 0.3, segmenter.noise_floor
+    finally:
+        segmenter.stop(seal_remaining=False)
+
+
+def test_a_pause_after_long_speech_is_still_found():
+    """The protection above must not blind the segmenter to a real pause."""
+    collected = []
+    segmenter = _segmenter(collected, min_seconds=1.0, max_seconds=30.0,
+                           silence_hold_seconds=0.4)
+    segmenter.start(datetime.now(timezone.utc))
+    try:
+        for _ in range(8):
+            segmenter.submit(_speech(1.0))
+        segmenter.submit(_room_tone(1.0))
+        segmenter.submit(_speech(0.5))
+        _wait_for(collected)
+        assert collected, "a pause after long speech is still a pause"
+        duration = len(collected[0].pcm) / BYTES_PER_SECOND
+        assert 8.0 < duration < 9.0, f"cut at {duration:.2f}s, outside the pause"
     finally:
         segmenter.stop(seal_remaining=False)
