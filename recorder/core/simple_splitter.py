@@ -128,7 +128,14 @@ class Segmenter:
         # syllables. The live threshold tracks the room and never drops below
         # this.
         self.silence_rms = silence_rms
+        # A strong gap: three seconds of quiet, far longer than a breath between
+        # sentences, so a cut here cannot land inside a phrase. This is what is
+        # looked for between the minimum and the maximum.
         self.silence_hold_bytes = int(silence_hold_seconds * self.bytes_per_second)
+        # Past the maximum the clip is overdue and the standard relaxes: half a
+        # strong gap will do. Better a cut at a one-and-a-half second pause than
+        # one forced at the ceiling wherever the words happen to be.
+        self.relaxed_hold_bytes = max(1, self.silence_hold_bytes // 2)
         self._on_segment = on_segment
 
         # 20 ms is short enough to place a cut precisely inside a gap, long
@@ -157,7 +164,7 @@ class Segmenter:
         self.fricative_zcr = 0.18
         # When a cut is forced, look back this far for the quietest moment
         # rather than slicing wherever the clip happened to reach.
-        self.lookback_bytes = int(2.0 * self.bytes_per_second)
+        self.lookback_bytes = int(5.0 * self.bytes_per_second)
 
         self._queue: "queue.Queue" = queue.Queue(maxsize=queue_depth)
         self._thread: Optional[threading.Thread] = None
@@ -270,13 +277,18 @@ class Segmenter:
         # Below the minimum, keep accumulating regardless of how quiet it is.
         # Otherwise a cough in the first seconds produces a one-second clip.
         if size < self.min_bytes:
-            self._silence_bytes = 0
-            self._silence_started_at_offset = None
+            # Below the minimum nothing is cut, but the pause is still tracked:
+            # a gap that begins at 28 s and runs to 33 s is a real gap, and
+            # forgetting it would throw away the best cut in the clip.
             return
 
         # A sustained pause, and past the minimum: cut in the middle of it, so
-        # neither clip begins or ends against a word.
-        if (self._silence_bytes >= self.silence_hold_bytes
+        # neither clip begins or ends against a word. Between the minimum and
+        # the maximum only a strong gap qualifies; past the maximum, where the
+        # clip is already overdue, a shorter one is accepted.
+        required = (self.relaxed_hold_bytes if size >= self.max_bytes
+                    else self.silence_hold_bytes)
+        if (self._silence_bytes >= required
                 and self._silence_started_at_offset is not None):
             middle = self._silence_started_at_offset + self._silence_bytes // 2
             logger.debug("Pause at %.1f s; cutting inside it at %.1f s",
@@ -317,6 +329,11 @@ class Segmenter:
             # until the threshold sat above a fricative and the guard below
             # stopped firing.
             threshold = max(float(self.silence_rms), self.noise_floor * self.silence_ratio)
+            # A hard ceiling on the threshold as well as on the floor. Silence
+            # is silence: it does not creep up towards the volume of the voice,
+            # whatever the room is doing.
+            if self._speech_level:
+                threshold = min(threshold, self._speech_level * 0.20)
             quiet = level < threshold
 
             # Quiet by loudness, but crossing zero on nearly every sample: an
@@ -342,10 +359,14 @@ class Segmenter:
                 # seconds of history means one window of unbroken speech cannot
                 # move it - a real pause has to be absent throughout.
                 candidate = min(self._recent_minima)
-                # ...and even then, the floor may never climb into the range
-                # where speech itself would read as silence.
+                # ...and even then, the floor stays far below speech. At a
+                # quarter of the speech level, three times the floor put the
+                # threshold at 75% of speech: every dip between syllables read
+                # as silence, a second of it piled up mid-sentence, and the clip
+                # cut the moment it passed the minimum. Which is exactly what
+                # was heard.
                 if self._speech_level:
-                    candidate = min(candidate, self._speech_level * 0.25)
+                    candidate = min(candidate, self._speech_level * 0.06)
                 self.noise_floor = max(float(self.silence_rms), candidate)
 
             self._frames.append((self._framed_bytes, level, not quiet))

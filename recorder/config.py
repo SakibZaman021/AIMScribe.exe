@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import List, Optional
 
 APP_NAME = "AIMScribe Recorder"
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.3.1"
 
 # Wire format version. The server rejects a mismatched agent rather than guessing.
 PROTOCOL_VERSION = 2
@@ -152,9 +152,9 @@ class SegmentConfig:
     max_seconds: float = 60.0
     # Speech rarely stops on cue. Rather than cut a talker mid-sentence at the
     # maximum, keep listening this much longer for somewhere natural to cut.
-    grace_seconds: float = 10.0
+    grace_seconds: float = 15.0
     silence_rms: int = 320          # linear RMS, 0-32767; ~-40 dBFS
-    silence_hold_seconds: float = 1.0
+    silence_hold_seconds: float = 3.0
 
 
 @dataclass(frozen=True)
@@ -288,9 +288,9 @@ class Config:
         segment = SegmentConfig(
             min_seconds=_float("AIMS_SEGMENT_MIN_SECONDS", 30.0),
             max_seconds=_float("AIMS_SEGMENT_MAX_SECONDS", 60.0),
-            grace_seconds=_float("AIMS_SEGMENT_GRACE_SECONDS", 10.0),
+            grace_seconds=_float("AIMS_SEGMENT_GRACE_SECONDS", 15.0),
             silence_rms=_int("AIMS_SILENCE_RMS", 320),
-            silence_hold_seconds=_float("AIMS_SILENCE_HOLD_SECONDS", 1.0),
+            silence_hold_seconds=_float("AIMS_SILENCE_HOLD_SECONDS", 3.0),
         )
 
         spool = SpoolConfig(

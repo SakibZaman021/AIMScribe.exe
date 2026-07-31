@@ -355,3 +355,84 @@ def test_a_pause_after_long_speech_is_still_found():
         assert 8.0 < duration < 9.0, f"cut at {duration:.2f}s, outside the pause"
     finally:
         segmenter.stop(seal_remaining=False)
+
+
+def _varying_speech(seconds: float, base: int = 9000, seed: int = 7) -> bytes:
+    """
+    Speech with the amplitude variation real speech has.
+
+    Syllables, stresses and unstressed vowels swing far below the average. A
+    threshold that drifts up towards the voice reads those dips as silence, and
+    the clip is cut in the middle of a sentence - which is what happened.
+    """
+    import random
+    rng = random.Random(seed)
+    total = int(seconds * SAMPLE_RATE)
+    out = array("h")
+    while len(out) < total:
+        syllable = int(rng.uniform(0.08, 0.25) * SAMPLE_RATE)
+        level = int(base * rng.uniform(0.35, 1.0))
+        for k in range(min(syllable, total - len(out))):
+            out.append(level if (k % 9) < 4 else -level)
+    return out.tobytes()
+
+
+def test_ordinary_speech_is_not_cut_at_the_minimum():
+    """
+    Breaths between sentences are not gaps. With nothing longer than about a
+    second anywhere, the clip must run on rather than cut the moment it becomes
+    eligible.
+    """
+    collected = []
+    segmenter = _segmenter(collected, min_seconds=3.0, max_seconds=30.0,
+                           grace_seconds=5.0, silence_hold_seconds=3.0)
+    segmenter.start(datetime.now(timezone.utc))
+    try:
+        for _ in range(4):
+            segmenter.submit(_varying_speech(2.0))
+            segmenter.submit(_room_tone(0.8))      # a breath, not a gap
+        time.sleep(1.0)
+        for clip in collected:
+            duration = len(clip.pcm) / BYTES_PER_SECOND
+            assert duration > 4.0, f"cut at {duration:.1f}s - at the minimum, mid-sentence"
+    finally:
+        segmenter.stop(seal_remaining=False)
+
+
+def test_a_strong_gap_inside_the_window_is_taken():
+    """Three seconds of quiet is a real break, and the clip should end there."""
+    collected = []
+    segmenter = _segmenter(collected, min_seconds=3.0, max_seconds=30.0,
+                           grace_seconds=5.0, silence_hold_seconds=3.0)
+    segmenter.start(datetime.now(timezone.utc))
+    try:
+        segmenter.submit(_varying_speech(5.0))
+        segmenter.submit(_room_tone(3.5))          # a genuine break
+        segmenter.submit(_varying_speech(2.0))
+        _wait_for(collected)
+        assert collected, "a three-second break should have closed the clip"
+        duration = len(collected[0].pcm) / BYTES_PER_SECOND
+        assert 5.0 < duration < 8.5, f"cut at {duration:.1f}s, outside the break"
+    finally:
+        segmenter.stop(seal_remaining=False)
+
+
+def test_past_the_maximum_a_shorter_gap_will_do():
+    """
+    Overdue, the standard relaxes: rather than force a cut at the ceiling, a
+    gap of half the usual length is accepted.
+    """
+    collected = []
+    segmenter = _segmenter(collected, min_seconds=2.0, max_seconds=4.0,
+                           grace_seconds=6.0, silence_hold_seconds=3.0)
+    segmenter.start(datetime.now(timezone.utc))
+    try:
+        segmenter.submit(_varying_speech(5.0))     # already past the maximum
+        segmenter.submit(_room_tone(1.8))          # too short before, enough now
+        segmenter.submit(_varying_speech(1.0))
+        _wait_for(collected)
+        assert collected, "past the maximum a shorter gap should be taken"
+        duration = len(collected[0].pcm) / BYTES_PER_SECOND
+        assert duration < 9.0, f"ran to the ceiling at {duration:.1f}s"
+    finally:
+        segmenter.stop(seal_remaining=False)

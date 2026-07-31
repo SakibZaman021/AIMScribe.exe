@@ -16,7 +16,7 @@
 ; ============================================================
 
 #define AppName        "AIMScribe Agent"
-#define AppVersion     "2.3.0"
+#define AppVersion     "2.3.1"
 #define AppPublisher   "AIMS LAB"
 #define AppExe         "AIMScribe_Agent.exe"
 
@@ -221,7 +221,11 @@ begin
     Env.Add('AIMS_SEGMENT_MAX_SECONDS=60');
     Env.Add('# Keep listening this much longer for a natural pause before');
     Env.Add('# cutting a talker mid-sentence.');
-    Env.Add('AIMS_SEGMENT_GRACE_SECONDS=10');
+    Env.Add('AIMS_SEGMENT_GRACE_SECONDS=15');
+    Env.Add('# A cut needs three seconds of quiet - far longer than a breath');
+    Env.Add('# between sentences - so it cannot land inside a phrase. Past 60s');
+    Env.Add('# the clip is overdue and half that will do.');
+    Env.Add('AIMS_SILENCE_HOLD_SECONDS=3');
     Env.Add('');
     Env.Add('AIMS_SPOOL_DIR=' + DataDir + '\spool');
     Env.Add('# 40 GB is about three weeks of backend downtime at 44.1 kHz.');
