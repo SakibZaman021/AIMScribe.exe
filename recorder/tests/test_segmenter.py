@@ -436,3 +436,54 @@ def test_past_the_maximum_a_shorter_gap_will_do():
         assert duration < 9.0, f"ran to the ceiling at {duration:.1f}s"
     finally:
         segmenter.stop(seal_remaining=False)
+
+
+# ============================================================
+# The recording itself is never touched
+#
+# Everything the segmenter measures - loudness, zero crossings, the noise floor -
+# is used to decide *where* to cut and for nothing else. No filtering, no noise
+# reduction, no gating, no normalisation. The clips are the microphone's bytes,
+# and joining them back gives the original recording exactly.
+# ============================================================
+
+def test_the_clips_reassemble_into_the_original_recording_byte_for_byte():
+    """
+    The strongest guarantee available: audio in, audio out, unchanged.
+
+    A signal of random samples is used because every sample is distinct, so any
+    alteration, loss, duplication or reordering changes the hash. This also
+    covers the cut mechanics - a clip may end part-way through the buffer, and
+    the remainder has to carry into the next clip with nothing dropped and
+    nothing repeated.
+    """
+    import hashlib
+    import random
+
+    rng = random.Random(1234)
+    source = array("h", [rng.randint(-20000, 20000)
+                         for _ in range(SAMPLE_RATE * 12)]).tobytes()
+
+    collected = []
+    segmenter = _segmenter(collected, min_seconds=2.0, max_seconds=4.0,
+                           grace_seconds=1.0, silence_hold_seconds=1.0)
+    segmenter.start(datetime.now(timezone.utc))
+    try:
+        offset = fed = 0
+        while offset < len(source):
+            step = rng.choice([1764, 2048, 4096, 8192])
+            segmenter.submit(source[offset:offset + step])
+            offset += step
+            fed += 1
+            if fed % 40 == 0:
+                time.sleep(0.05)      # the worker drains; real time would do this
+        time.sleep(1.0)
+    finally:
+        segmenter.stop(seal_remaining=True)
+    time.sleep(0.5)
+
+    rebuilt = b"".join(clip.pcm for clip in collected)
+    assert len(rebuilt) == len(source), (
+        f"{len(source) - len(rebuilt)} bytes of the recording went missing")
+    assert hashlib.sha256(rebuilt).digest() == hashlib.sha256(source).digest(), \
+        "the audio that came out is not the audio that went in"
