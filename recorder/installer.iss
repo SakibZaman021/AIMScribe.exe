@@ -16,7 +16,7 @@
 ; ============================================================
 
 #define AppName        "AIMScribe Agent"
-#define AppVersion     "2.2.0"
+#define AppVersion     "2.3.0"
 #define AppPublisher   "AIMS LAB"
 #define AppExe         "AIMScribe_Agent.exe"
 
@@ -43,6 +43,16 @@ PrivilegesRequired=admin
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayName={#AppName}
 UninstallDisplayIcon={app}\{#AppExe}
+; Setup stops the agent itself in PrepareToInstall, so Windows' RestartManager
+; has nothing useful to add - and a great deal to take away. It scans for
+; anything holding our files, finds a Windows service that cannot be closed
+; (Program Compatibility Assistant, typically), and asks Abort/Retry/Ignore.
+; On a silent install that prompt defaults to Abort, so the upgrade rolls back
+; and reports failure while the old version keeps running. Across a fleet that
+; is a machine that looks updated and is not.
+CloseApplications=no
+RestartApplications=no
+
 ; A clinical PC should be told what it is running.
 VersionInfoVersion={#AppVersion}
 VersionInfoCompany={#AppPublisher}
