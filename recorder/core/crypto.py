@@ -18,6 +18,24 @@ Three jobs:
 
 Every hash is length-prefixed and domain-separated, so no field can be shifted
 into another to produce a colliding pre-image.
+
+The chain and receipt rules below are one half of a specification whose other
+half is the backend's `src/integrity.py`, in a different repository. They must
+agree byte for byte: if they do not, valid chains are rejected and the scheme
+becomes noise.
+
+That agreement is pinned rather than remembered. `tests/wire_vectors.json` holds
+fixed inputs and the exact outputs required, `tests/test_wire_compatibility.py`
+replays them against this module, and an identical copy of the vectors lives in
+the backend repository doing the same there. Change a rule here and this
+repository's own tests fail immediately.
+
+Regenerating the vectors redefines the protocol and is a two-repository change:
+
+    python scripts/gen_wire_vectors.py tests/wire_vectors.json
+
+then copy the file to the backend and update `EXPECTED_SHA256` in both test
+files.
 """
 from __future__ import annotations
 
