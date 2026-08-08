@@ -17,12 +17,6 @@ Two things live in this repository:
 The AI backend, the database and the archive worker live in
 [AIMScribe_Backend_Render](https://github.com/SakibZaman021/AIMScribe_Backend_Render).
 
-> `aimslab-server/` is **v1 leftover code and is not part of the running
-> system.** It exposes an unauthenticated upload endpoint and posts to
-> `/api/v1/session/create`. The real AIMS LAB server component is
-> `archive_worker/` in the backend repository, which is outbound-only. Do not
-> deploy `aimslab-server/`.
-
 ---
 
 ## Where to go next
@@ -31,10 +25,10 @@ The AI backend, the database and the archive worker live in
 |---|---|
 | **This file** | What the system is and how a consultation travels through it |
 | [`OPERATIONS.md`](OPERATIONS.md) | How do I enrol a laptop, add a clinic, or fix a failure? |
-| [`TARGET_ARCHITECTURE.md`](TARGET_ARCHITECTURE.md) | How is it built, and why that way? Data model and capacity |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | How is it built, and why that way? Data model and capacity |
 | [`INTEGRATION_SPECIFICATION.md`](INTEGRATION_SPECIFICATION.md) | Exact contract: grants, WebSocket commands, HTTP routes |
-| [`SECURITY_HARDENING_PLAN.md`](SECURITY_HARDENING_PLAN.md) | The v1 defects this system was built to fix (historical record) |
-| [`ARCHITECTURE_DESIGN.md`](ARCHITECTURE_DESIGN.md) | Superseded first-generation design notes, kept for history |
+| [`SECURITY.md`](SECURITY.md) | What the system enforces, the known gaps, and how to report a flaw |
+| [`CLIENT_DEMO_SETUP.md`](CLIENT_DEMO_SETUP.md) | Setting up a demonstration or evaluation machine |
 
 ---
 
@@ -225,8 +219,10 @@ cd recorder
 python -m pytest
 ```
 
-Covers the hash chain, the spool, the segmenter, and a regression for each
-security defect listed in `SECURITY_HARDENING_PLAN.md`.
+Covers the hash chain, the spool, the segmenter, and a regression test for each
+security property listed in [`SECURITY.md`](SECURITY.md) — grant forgery,
+`alg: none`, replay, cross-device writes, and unsigned purge receipts among
+them.
 
 ---
 

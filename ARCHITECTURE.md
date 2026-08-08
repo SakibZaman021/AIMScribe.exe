@@ -1,10 +1,11 @@
 # AIMScribe Architecture
 
-How the system is built and why. This describes what is **deployed today**, not
-an aspiration — the name is kept for continuity with earlier revisions.
+How the system is built and why. This describes what is **deployed today** —
+agent 2.3.1, protocol 2 — not an aspiration.
 
 For procedures see [`OPERATIONS.md`](OPERATIONS.md); for the wire contract see
-[`INTEGRATION_SPECIFICATION.md`](INTEGRATION_SPECIFICATION.md).
+[`INTEGRATION_SPECIFICATION.md`](INTEGRATION_SPECIFICATION.md); for what the
+system enforces see [`SECURITY.md`](SECURITY.md).
 
 ---
 
@@ -278,5 +279,4 @@ it.**
 - `D:\AIMSLAB_AUDIO_STORAGE` has no backup.
 - v1 routes on the backend remain unauthenticated; only `/api/v2` requires a
   credential.
-- `aimslab-server/` in this repository is dead v1 code that contradicts the pull
-  design and must not be deployed.
+- mTLS between agent and backend is supported by configuration but not deployed.

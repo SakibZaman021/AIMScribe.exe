@@ -1,7 +1,8 @@
 # AIMScribe Operations Runbook
 
 Day-to-day procedures for running the fleet. For how the system works, see
-[`README.md`](README.md); for the exact wire contract, see
+[`README.md`](README.md) and [`ARCHITECTURE.md`](ARCHITECTURE.md); for the exact
+wire contract, see
 [`INTEGRATION_SPECIFICATION.md`](INTEGRATION_SPECIFICATION.md).
 
 Everything here is done from an **administrator's** machine. Nothing in this
