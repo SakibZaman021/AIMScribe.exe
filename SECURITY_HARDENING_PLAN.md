@@ -1,5 +1,15 @@
 # AIMScribe — Industry-Grade Hardening Plan
 
+> **Historical record — read this as "what was wrong with v1 and why v2 is
+> shaped the way it is."** The system described under *"What the system actually
+> does today"* below is the **v1 design and no longer exists**: clips are now
+> 30–60 s (not 170–190), audio is 44.1 kHz (not 32), the AIMS LAB server no
+> longer accepts inbound uploads at all, and `aimslab-server/` is dead code.
+>
+> The defect list keeps its value — there is a regression test for each entry —
+> so it is preserved verbatim rather than rewritten. For the system as built
+> today see [`TARGET_ARCHITECTURE.md`](TARGET_ARCHITECTURE.md).
+
 **Reviewed**: 2026-07-26 · **Scope**: `recorder/`, `cmed-web/`, `aimslab-server/`, docs
 **Not in this repo**: the AIMScribe Backend (FastAPI + Postgres + Redis + MinIO/R2 + Whisper worker) at
 `https://aimscribe-backend-render.onrender.com`. Several findings below imply backend work — flagged `[BACKEND]`.

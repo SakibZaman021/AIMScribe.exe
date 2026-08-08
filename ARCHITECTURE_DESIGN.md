@@ -1,5 +1,18 @@
 # AIMScribe Industrial Architecture Design
 
+> **Superseded. Kept for history only.**
+>
+> This was the first-generation design. It predates device enrolment, recording
+> grants, the hash chain, purge receipts and the outbound-only archive worker —
+> in other words, everything that now defines the system. Several details here
+> are actively wrong for the deployed system (inbound uploads to the AIMS LAB
+> server, MinIO for chunks, doctor identity taken from the PC).
+>
+> **Current documents:** [`README.md`](README.md) ·
+> [`TARGET_ARCHITECTURE.md`](TARGET_ARCHITECTURE.md) ·
+> [`INTEGRATION_SPECIFICATION.md`](INTEGRATION_SPECIFICATION.md) ·
+> [`OPERATIONS.md`](OPERATIONS.md)
+
 ## Version: 2.0 - Distributed System with WebSocket Communication
 
 ---
