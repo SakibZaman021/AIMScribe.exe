@@ -130,6 +130,36 @@ Three independent re-verifications guard the audio itself:
 
 Only after the third does the backend issue purge receipts.
 
+### Two implementations, one specification
+
+The chain is built by `recorder/core/crypto.py` here and verified by
+`src/integrity.py` in the backend repository. Every constant and hashing rule
+must agree byte for byte, or valid chains are rejected and the scheme becomes
+noise — and the two repositories are never checked out together, so a
+one-character divergence would be invisible in review.
+
+That agreement is pinned by golden vectors rather than by discipline.
+`recorder/tests/wire_vectors.json` holds fixed inputs and the exact outputs the
+format requires; an identical copy lives in the backend. Each side replays them
+against its own code, so either detects its own drift alone:
+
+- **Here**, `tests/test_wire_compatibility.py` rebuilds a full signed session
+  from a fixed key and requires every entry to come out byte for byte identical.
+  Ed25519 is deterministic, so signatures are pinned too.
+- **In the backend**, the same vectors must verify — whole chain and per entry —
+  and its `ReceiptSigner` must reproduce the reference signature exactly. If it
+  did not, every agent would reject every receipt and silently never delete its
+  local audio.
+
+Both pin the vectors' SHA-256, and both repositories mark the file `-text` in
+`.gitattributes` so line-ending conversion cannot change that hash on checkout.
+
+Regenerating the vectors redefines the protocol and is a two-repository change:
+
+```powershell
+python scripts\gen_wire_vectors.py tests\wire_vectors.json
+```
+
 ---
 
 ## 5. Storage tiers

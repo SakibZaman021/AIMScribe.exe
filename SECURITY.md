@@ -100,6 +100,26 @@ Local audio is deleted only against an Ed25519 purge receipt proving the archive
 holds a verified copy — then only after a 24-hour grace period. **If the archive
 is lost, no receipt is issued and nothing is deleted.**
 
+### The chain format cannot drift from the backend's
+
+The chain is built here and verified in a different repository. If the two
+implementations disagree by one byte, valid chains are rejected — and nothing
+about reviewing either repository alone would reveal it.
+
+| Property | Test |
+|---|---|
+| The vectors are the ones the backend also holds | `test_vectors_file_is_the_agreed_one` |
+| Domains match the specification | `test_domains_match_the_specification` |
+| A shifted field boundary cannot collide | `test_length_prefixing_actually_separates_fields` |
+| Canonical JSON is byte-exact, Bengali included | `test_canonical_json` |
+| A full signed session rebuilds byte for byte | `test_agent_reproduces_the_reference_chain` |
+| The backend's receipt verifies here | `test_agent_accepts_the_reference_receipt` |
+| Unsupported types are refused, as on the backend | `test_canonical_json_rejects_types_the_backend_cannot_represent` |
+
+`tests/wire_vectors.json` is checked into both repositories byte-identically and
+its SHA-256 is pinned in both test suites, so editing it in one place alone
+fails that repository's own tests.
+
 ### Refusing to run insecurely
 
 | Property | Test |
