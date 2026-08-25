@@ -27,6 +27,7 @@ The AI backend, the database and the archive worker live in
 | [`OPERATIONS.md`](OPERATIONS.md) | How do I enrol a laptop, add a clinic, or fix a failure? |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | How is it built, and why that way? Data model and capacity |
 | [`INTEGRATION_SPECIFICATION.md`](INTEGRATION_SPECIFICATION.md) | Exact contract: grants, WebSocket commands, HTTP routes |
+| [`SRS.md`](SRS.md) | Numbered, testable requirements for the whole pipeline, and how they are verified |
 | [`CMED_INTEGRATION_README.md`](CMED_INTEGRATION_README.md) | For a partner's engineers: the trigger, the flag, the replies we owe them, and server sizing |
 | [`PARTNER_INTEGRATION_REQUIREMENTS.md`](PARTNER_INTEGRATION_REQUIREMENTS.md) | The single interface proposed to CMED, Aalo and Amader Susastho |
 | [`SECURITY.md`](SECURITY.md) | What the system enforces, the known gaps, and how to report a flaw |
