@@ -5,7 +5,7 @@ Prepared by AIMS LAB · Independent University, Bangladesh.
 
 | | |
 |---|---|
-| Document version | 1.0 |
+| Document version | 1.1 |
 | Date | 22 August 2026 |
 | Agent version | 2.3.1 |
 | Wire protocol | 2 |
@@ -741,6 +741,30 @@ nothing, and exposes no write route.**
 Cost on our side: one round-trip at session start. Mitigated by starting capture
 immediately and validating in parallel, so a slow link never costs the opening
 seconds of a consultation. Cost on your side: none.
+
+### 7.2a The clinic register
+
+Seven sites, two consulting rooms each, one laptop per room. `HOSP001`–`HOSP006`
+are the six Aalo branches; `HOSP007` is Amader Susastho.
+
+| `hospital_id` | Site | Operator |
+|---|---|---|
+| `HOSP001` | Karail | Aalo |
+| `HOSP002` | Mirpur | Aalo |
+| `HOSP003` | Dholpur | Aalo |
+| `HOSP004` | Shyampur | Aalo |
+| `HOSP005` | Naryanganj | Aalo |
+| `HOSP006` | Ershadnagar | Aalo |
+| `HOSP007` | Amader Susastho | Amader Susastho |
+
+Per clinic we need one thing agreed in writing before the first recording: which
+identifier **your** system sends in `clinic_id`, and which `hospital_id` it maps
+to. That is a fact exchanged once by email, not an interface. It is the only
+operational touchpoint enrolment has with a partner.
+
+These identifiers cannot be renamed. Three of them already appear inside signed
+chain payloads in the archive, so changing one would invalidate the signature
+over every entry that follows it. Display names remain free to change.
 
 ### 7.3 Clinic mismatch: we will refuse, not warn
 

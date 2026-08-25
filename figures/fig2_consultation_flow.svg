@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 900" color="#1a1a1a" role="img"
+     aria-label="Life of a consultation. The partner page sends a trigger; the microphone opens immediately while authorisation proceeds in parallel. Segments are sealed, uploaded and verified by server-side read-back every thirty to sixty seconds. A prescription-built flag arms the gate; until it arrives a stray trigger is refused and the recording continues. Once armed, the next trigger closes one session and opens the next on parallel threads with no gap in capture. The backend verifies the whole hash chain and issues purge receipts, and only then is local audio deleted.">
+  <defs>
+    <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+    <marker id="bc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#b3261e"/>
+    </marker>
+  </defs>
+
+  <!-- lane heads -->
+  <g fill="none" stroke="currentColor" stroke-width="1.5">
+    <rect x="28" y="24" width="184" height="40" rx="5"/>
+    <rect x="300" y="24" width="184" height="40" rx="5"/>
+    <rect x="590" y="24" width="184" height="40" rx="5"/>
+    <rect x="866" y="24" width="184" height="40" rx="5"/>
+  </g>
+  <g font-family="Helvetica, Arial, sans-serif" font-size="12.5" font-weight="bold" fill="currentColor" text-anchor="middle">
+    <text x="120" y="49">Partner page</text>
+    <text x="392" y="49">AIMScribe agent</text>
+    <text x="682" y="49">AIMS LAB backend</text>
+    <text x="958" y="49">Archive</text>
+  </g>
+
+  <!-- lifelines -->
+  <g stroke="currentColor" stroke-width="1" stroke-dasharray="3 4" opacity="0.55">
+    <line x1="120" y1="64" x2="120" y2="856"/>
+    <line x1="392" y1="64" x2="392" y2="856"/>
+    <line x1="682" y1="64" x2="682" y2="856"/>
+    <line x1="958" y1="64" x2="958" y2="856"/>
+  </g>
+
+  <!-- parallel band -->
+  <g fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="5 4" opacity="0.75">
+    <rect x="264" y="118" width="470" height="150" rx="6"/>
+  </g>
+  <text x="278" y="136" font-family="Helvetica, Arial, sans-serif" font-size="10.5" fill="currentColor" opacity="0.85"
+        font-style="italic">capture and authorisation run in parallel — a slow link never costs the opening seconds</text>
+
+  <!-- segment loop band -->
+  <g fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="5 4" opacity="0.75">
+    <rect x="264" y="376" width="470" height="146" rx="6"/>
+  </g>
+  <text x="278" y="394" font-family="Helvetica, Arial, sans-serif" font-size="10.5" fill="currentColor" opacity="0.85"
+        font-style="italic">repeats every 30–60 s until the consultation ends</text>
+
+  <!-- messages -->
+  <g fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#b)">
+    <path d="M120,100 L386,100"/>
+    <path d="M392,172 L676,172"/>
+    <path d="M682,232 L398,232"/>
+    <path d="M392,262 L676,262"/>
+    <path d="M682,292 L398,292"/>
+    <path d="M392,322 L126,322"/>
+    <path d="M392,412 L676,412"/>
+    <path d="M392,442 L676,442"/>
+    <path d="M392,472 L676,472"/>
+    <path d="M392,662 L676,662"/>
+    <path d="M682,722 L398,722"/>
+    <path d="M682,782 L952,782"/>
+  </g>
+  <!-- partner-sent signals, accented -->
+  <g fill="none" stroke="#b3261e" stroke-width="2" marker-end="url(#bc)">
+    <path d="M120,552 L386,552"/>
+    <path d="M120,604 L386,604"/>
+    <path d="M120,636 L386,636"/>
+  </g>
+  <g fill="none" stroke="#b3261e" stroke-width="1.6" marker-end="url(#bc)" stroke-dasharray="5 3">
+    <path d="M392,578 L126,578"/>
+  </g>
+
+  <!-- self actions -->
+  <g fill="none" stroke="currentColor" stroke-width="1.4">
+    <rect x="300" y="118" width="184" height="30" rx="4"/>
+    <rect x="590" y="190" width="184" height="30" rx="4"/>
+    <rect x="590" y="484" width="184" height="30" rx="4"/>
+    <rect x="300" y="682" width="184" height="30" rx="4"/>
+    <rect x="590" y="692" width="184" height="30" rx="4"/>
+    <rect x="300" y="742" width="184" height="30" rx="4"/>
+    <rect x="866" y="806" width="184" height="44" rx="4"/>
+  </g>
+  <g fill="none" stroke="#b3261e" stroke-width="1.8">
+    <rect x="300" y="516" width="184" height="26" rx="4"/>
+    <rect x="300" y="616" width="184" height="0.01"/>
+  </g>
+
+  <g font-family="Helvetica, Arial, sans-serif" fill="currentColor" font-size="11">
+    <text x="130" y="94">1 · doctor opens patient details → <tspan font-weight="bold">trigger</tspan> (5 fields)</text>
+    <text x="392" y="137" text-anchor="middle" font-weight="bold">2 · microphone opens — t = 0</text>
+    <text x="402" y="166">3 · mint grant (device token)</text>
+    <text x="682" y="209" text-anchor="middle">4 · check doctor · clinic · device</text>
+    <text x="672" y="226" text-anchor="end">5 · signed grant · 60 s · single use</text>
+    <text x="402" y="256">6 · session/open + chain entry 0</text>
+    <text x="672" y="286" text-anchor="end">7 · session_id (ULID)</text>
+    <text x="386" y="316" text-anchor="end" font-weight="bold">8 · 200 RECORDING_STARTED</text>
+    <text x="402" y="406">9 · segment/authorize</text>
+    <text x="402" y="436">10 · PUT encrypted segment</text>
+    <text x="402" y="466">11 · commit + SHA-256</text>
+    <text x="682" y="503" text-anchor="middle" font-weight="bold">12 · read back · re-hash · compare</text>
+    <text x="402" y="656">16 · session/close + chain tail</text>
+    <text x="682" y="711" text-anchor="middle">17 · verify the whole chain</text>
+    <text x="672" y="716" text-anchor="end" opacity="0">.</text>
+    <text x="672" y="746" text-anchor="end">18 · purge receipts</text>
+    <text x="392" y="761" text-anchor="middle" font-weight="bold">19 · delete local audio (24 h grace)</text>
+    <text x="692" y="776">20 · verified session</text>
+    <text x="958" y="825" text-anchor="middle">21 · concatenate · verify</text>
+    <text x="958" y="841" text-anchor="middle">PID_DID_HOSID_START_END_DATE</text>
+  </g>
+
+  <g font-family="Helvetica, Arial, sans-serif" fill="#b3261e" font-size="11" font-weight="bold">
+    <text x="130" y="546">13 · <tspan font-weight="normal">prescription built →</tspan> consultation_complete</text>
+    <text x="392" y="534" text-anchor="middle">14 · GATE ARMED</text>
+    <text x="130" y="598">15a · trigger while gate NOT armed</text>
+    <text x="386" y="572" text-anchor="end" font-weight="normal">409 GATE_NOT_ARMED — recording continues</text>
+    <text x="130" y="630">15b · trigger, gate armed</text>
+  </g>
+  <text x="392" y="701" font-family="Helvetica, Arial, sans-serif" fill="currentColor" font-size="11"
+        text-anchor="middle" font-weight="bold">close N and open N+1 — parallel, no gap</text>
+
+  <!-- claim strip -->
+  <g fill="none" stroke="#b3261e" stroke-width="1.4" stroke-dasharray="4 4">
+    <rect x="28" y="806" width="800" height="70" rx="6"/>
+  </g>
+  <g font-family="Helvetica, Arial, sans-serif">
+    <text x="48" y="828" font-size="12" font-weight="bold" fill="#b3261e">The two red signals are everything the partner implements.</text>
+    <text x="48" y="846" font-size="11" fill="currentColor">Steps 13 and 15 are the consultation gate: a prescription must be built before a new patient can end the current recording,</text>
+    <text x="48" y="862" font-size="11" fill="currentColor">so a mis-click (15a) cannot cut a consultation in half. Local audio is deleted only after step 18 proves archived custody.</text>
+  </g>
+</svg>

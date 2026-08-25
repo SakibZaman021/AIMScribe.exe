@@ -7,7 +7,7 @@
 | | |
 |---|---|
 | Document | AIMS-SRS-001 |
-| Version | 1.0 |
+| Version | 1.1 |
 | Date | 25 August 2026 |
 | Status | Baseline for integration. Items marked **OD-nn** are open and need a decision. |
 | Relationship to other documents | Complements `CMED_INTEGRATION_README.md` (narrative) with numbered, testable requirements. |
@@ -30,7 +30,7 @@
 
 **Part III — Requirements**
 6. [External interface requirements](#6-external-interface-requirements)
-7. [Functional requirements](#7-functional-requirements)
+7. [Functional requirements](#7-functional-requirements) — including the capture path (§7.1a) and speech-level monitoring (§7.1b)
 8. [Data requirements](#8-data-requirements)
 9. [Non-functional requirements](#9-non-functional-requirements)
 10. [Capacity and sizing](#10-capacity-and-sizing)
@@ -236,7 +236,7 @@ waiting to happen and an audit finding waiting to be written.
 | Element | Specification |
 |---|---|
 | Consulting-room PC | Windows 10 21H2 or Windows 11; x64; ≥ 4 GB RAM; ≥ 60 GB free on the spool volume |
-| Audio input | Any Windows-enumerated capture device; USB or built-in |
+| Audio input | USB speakerphone or microphone. **The capture path is a requirement, not a detail — see §7.1a.** |
 | Browser | Chrome or Edge, current stable, on the same PC as the agent |
 | Clinic network | Intermittent by assumption. Broadband where available, mobile tethering elsewhere. |
 | Agent runtime | Python 3.12 packaged with PyInstaller; nothing installed on the PC beyond the app |
@@ -317,6 +317,16 @@ CMED's total build is four rows. §13.2 estimates it at 2–4 developer-days.
 
 ### 3.2 Deployment topology
 
+![Figure 1 — AIMScribe system architecture](figures/fig1_architecture.svg)
+
+**Figure 1.** System architecture. A partner web application serves a page to the
+browser on the consulting-room PC; that page reaches the AIMScribe agent only
+over a loopback WebSocket on the same machine. The agent captures, segments,
+encrypts, hash-chains and uploads audio to the AIMS LAB backend, which verifies
+every segment by reading it back from storage and re-hashing it. An archive
+worker inside AIMS LAB dials outward to collect verified sessions. No partner
+system ever connects to AIMS LAB infrastructure.
+
 ```mermaid
 flowchart TB
     subgraph CLINIC["Consulting room — one of ~30"]
@@ -367,6 +377,17 @@ originates outside the clinic.** The archive worker dials out; it accepts no
 inbound connection. CMED is never called by us.
 
 ### 3.3 The pipeline, end to end
+
+![Figure 2 — Life of a consultation](figures/fig2_consultation_flow.svg)
+
+**Figure 2.** Life of a consultation. The microphone opens on the trigger while
+authorisation proceeds in parallel, so a slow link never costs the opening
+seconds. Segments are sealed, uploaded and verified by server-side read-back
+throughout. A prescription-built flag arms the gate; until it arrives a stray
+trigger is refused (15a) and the recording continues undisturbed. Once armed,
+the next trigger closes one session and opens the next on parallel threads with
+no gap in capture. Local audio is deleted only after the chain verifies and
+purge receipts are issued.
 
 This is the answer to *"the full AIMScribe pipeline from the recording to
 AIMScribe_Backend"*. Twenty steps, one consultation.
@@ -647,6 +668,12 @@ doctor arrives from CMED with each trigger. This is `SRS-INV-03` in practice.
 >
 > **`SRS-ENR-17`** [M, I, AIMS] Every enrolment, re-issue and revocation shall be
 > written to the append-only audit log with the acting administrator's name.
+>
+> **`SRS-ENR-21`** [M, T, AIMS] A device shall not be re-enrolled while segments
+> remain unpurged in its spool. Re-enrolment issues a new device identity, and
+> segments belonging to sessions opened under the previous identity cannot be
+> committed with the new credential. The spool shall be drained to zero first,
+> and the agent shall refuse re-enrolment until it is.
 
 ### 4.6 What changes for enrolment when CMED is integrated
 
@@ -686,6 +713,28 @@ by email, and recorded on both sides. It is a fact, not an interface.
 > **`SRS-ENR-19`** [M, I, Joint] For each clinic, CMED and AIMS LAB shall agree
 > one stable mapping from CMED's clinic identifier to the AIMS LAB
 > `hospital_id`, recorded in writing before the first recording at that site.
+
+**The register.** Seven sites, two consulting rooms each, one laptop per room:
+
+| `hospital_id` | Site | Operator | Rooms | Status |
+|---|---|---|---|---|
+| `HOSP001` | Karail | Aalo | 2 | In service — signed recordings exist |
+| `HOSP002` | Mirpur | Aalo | 2 | Assigned |
+| `HOSP003` | Dholpur | Aalo | 2 | In service — signed recordings exist |
+| `HOSP004` | Shyampur | Aalo | 2 | In service — signed recordings exist |
+| `HOSP005` | Naryanganj | Aalo | 2 | To be assigned |
+| `HOSP006` | Ershadnagar | Aalo | 2 | To be assigned |
+| `HOSP007` | Amader Susastho | Amader Susastho | 2 | To be assigned |
+
+`HOSP001`–`HOSP006` are the six Aalo branches; `HOSP007` is Amader Susastho.
+Fourteen rooms, fourteen laptops, two spares held centrally — sixteen enrolment
+tokens in total.
+
+Identifiers `HOSP001`, `HOSP003` and `HOSP004` are **immutable in the strongest
+sense**: they appear inside signed chain payloads in the existing archive, so
+changing one would invalidate the Ed25519 signature over every entry that
+follows it. They cannot be renamed, and a signed payload cannot be edited by
+hand. Display names remain free to change at any time.
 >
 > **`SRS-ENR-20`** [M, T, AIMS] The backend shall reject a trigger whose clinic
 > identifier does not map to the enrolled clinic of the device that presented it.
@@ -1094,6 +1143,74 @@ or pointed at the wrong input. It is distinct from, and must not be confused
 with, the segmenter's adaptive noise floor in `SRS-SEG-03`, which is a
 *boundary-finding* mechanism and raises no notification at all.
 
+### 7.1a The capture path — `CAP` continued
+
+Between the microphone capsule and the WAV file sit several stages of optional
+processing, and every one of them is a place where a quiet talker disappears. A
+consultation has two talkers at very different levels: the doctor is close to
+the device and speaks with professional projection; the patient is further away,
+often unwell, often elderly, and speaks quietly. Any processing tuned to
+"isolate the dominant near-field talker" — which is what conferencing hardware
+is built to do — will remove the patient.
+
+Measurements on 128 archived research sessions established the failure
+signature. In degraded sessions the noise floor sits at −87 to −97 dBFS with
+**8.7% of frames at literal digital zero**, and the quiet talker lands at −56 to
+−69 dBFS. In healthy sessions from the same fleet the floor is −60 to −71 dBFS
+and the quiet talker is at −36 to −42 dBFS. The loud talker is at −18 to −21
+dBFS in both. A microphone in a room with a fan cannot produce digital zero;
+only a gate can.
+
+| ID | Requirement | Pri | Ver | Owner |
+|---|---|---|---|---|
+| `SRS-CAP-07` | Capture shall use the device's **native sample rate and channel count**, with no operating-system resampling or downmix in the path. | M | T | AIMS |
+| `SRS-CAP-08` | Capture shall use a low-latency host API that bypasses the shared audio engine where one is available (WASAPI on Windows). The legacy MME path shall not be used. | M | I | AIMS |
+| `SRS-CAP-09` | The capture device shall be selected by **name and host API**, never by numeric index, because indices move between reboots and USB ports. | M | T | AIMS |
+| `SRS-CAP-10` | Device-side or OS-side automatic gain control, noise suppression and gating shall be disabled wherever the platform exposes them. | M | I | AIMS |
+| `SRS-CAP-11` | A machine shall not be accepted into service until a commissioning measurement shows **< 0.5% of frames at digital zero** over 60 s of occupied-room audio. | M | T | AIMS |
+| `SRS-CAP-12` | Commissioning shall record and store, per room: peak level, noise floor (P10), quiet-talker level (P25 of speech frames) and loud-talker level (P90). | M | T | AIMS |
+| `SRS-CAP-13` | Where the platform cannot expose the device's processing, hardware without onboard processing shall be used instead. A conferencing device whose DSP cannot be disabled is not fit for archival capture. | M | A | AIMS |
+
+**Acceptance envelope**, derived from the fleet's own healthy population rather
+than chosen a priori:
+
+| Quantity | Target | Reject |
+|---|---|---|
+| Peak (loud talker) | −6 to −12 dBFS | above −3 dBFS (clipping) |
+| Noise floor (P10) | −60 to −75 dBFS | below −85 dBFS (gating) |
+| Quiet talker (P25 of speech) | above −45 dBFS | below −50 dBFS |
+| Frames at digital zero | < 0.5% | ≥ 0.5% |
+
+**Gain is not the lever.** The fleet already records the doctor at −18 to −21
+dBFS, which is correct, and at least one archived session clipped at 0.0 dBFS.
+Raising input gain moves the loud talker into clipping without lifting the quiet
+talker at all, because the quiet talker is not attenuated — it is being gated.
+Physical placement is worth 6–10 dB and costs nothing: sound falls 6 dB per
+doubling of distance, so moving the device toward the patient transfers level
+from the talker who has 20 dB to spare to the one who needs it.
+
+### 7.1b Speech-level monitoring — `LVL`
+
+The condition that degrades transcription is the same condition that breaks
+segmentation, so one measurement serves both. It must be expressed as a
+**ratio**, never an absolute level: a loud room with a loud talker is fine.
+
+| ID | Requirement | Pri | Ver | Owner |
+|---|---|---|---|---|
+| `SRS-LVL-01` | The agent shall compute, per sealed segment, the noise floor and the 25th and 90th percentiles of speech-frame level. | M | T | AIMS |
+| `SRS-LVL-02` | These figures shall be reported to the backend as operational metrics for every session. | M | T | AIMS |
+| `SRS-LVL-03` | When the quiet talker falls below −50 dBFS while the loud talker is above −25 dBFS, the overlay shall show a non-modal prompt to ask the patient to speak a little louder. | S | D | AIMS |
+| `SRS-LVL-04` | When both talkers are low, the prompt shall instead report a microphone problem, because that is not something a patient can fix. | S | T | AIMS |
+| `SRS-LVL-05` | When the loud talker exceeds −3 dBFS the agent shall warn that the recording is clipping. | S | T | AIMS |
+| `SRS-LVL-06` | Level prompts shall latch **once per session**, shall never be modal, and shall never require dismissal. | M | T | AIMS |
+| `SRS-LVL-07` | The first segment of a session shall be exempt, while the noise-floor estimate is still converging. | M | T | AIMS |
+| `SRS-LVL-08` | Rooms chronically below the envelope shall be reported to operations as an **environment or hardware defect**, not addressed by prompting the doctor. | M | I | AIMS |
+
+`SRS-LVL-08` matters more than the prompt does. A room that sits below the
+envelope every day needs a microphone moved or replaced; asking a clinician to
+raise their voice thirty times a day is not a fix, and treating it as one hides
+a defect behind a human.
+
 ### 7.2 Segmentation — `SEG`
 
 | ID | Requirement | Pri | Ver | Owner |
@@ -1103,6 +1220,8 @@ with, the segmenter's adaptive noise floor in `SRS-SEG-03`, which is a
 | `SRS-SEG-03` | Silence detection shall use linear RMS with a 320 threshold and a 3.0 s hold, against an adaptive noise floor, combined with zero-crossing rate. | M | I | AIMS |
 | `SRS-SEG-04` | Segmentation shall run on its own thread, so a slow disk cannot stall capture. | M | I | AIMS |
 | `SRS-SEG-05` | Segments shall be numbered contiguously from zero within a session, with no gaps. | M | T | AIMS |
+| `SRS-SEG-06` | Silence detection shall be **level-independent**: the speech estimate shall be seeded from the opening seconds of audio rather than from a fixed constant, so a quiet or gated input degrades gracefully instead of classifying an entire clip as silence. | M | T | AIMS |
+| `SRS-SEG-07` | At least 80% of segments in a commissioned room shall fall within the 30–60 s target window, measured over a clinic day. | M | A | AIMS |
 
 **Why 30–60 s and not three minutes.** A segment is the unit of upload, retry and
 loss. At three minutes a single failure put three minutes of consultation at risk
@@ -1138,6 +1257,17 @@ eliminate it.
 | `SRS-SPL-12` | The checkpoint shall be validated across repeated induced-termination trials before being described as an operational capability. | S | T | AIMS |
 
 ### 7.4 Integrity — `CHN`
+
+![Figure 3 — Chain of custody](figures/fig3_chain_of_custody.svg)
+
+**Figure 3.** Chain of custody. Each session carries an Ed25519-signed hash chain
+whose entries link by the previous entry's digest, so omission, reordering or
+edit is detectable. A sealed segment is encrypted on the PC, uploaded, then read
+back and re-hashed by the server before acceptance. The archived WAV is
+bit-identical to what was captured and is the hashed evidence; the
+speech-recognition rendition is derived from it and never hashed. Local audio
+moves PENDING → COMMITTED → RECEIPTED → PURGED, and a hash mismatch quarantines
+the session so nothing is deleted automatically.
 
 | ID | Requirement | Pri | Ver | Owner |
 |---|---|---|---|---|
@@ -1379,6 +1509,37 @@ archive tree.
 > **`SRS-DAT-10`** [M, I, AIMS] No secret shall appear in either public source
 > repository. `.env` shall be gitignored, and enrolment token sheets treated as
 > credentials.
+
+### 8.5 One original, one derivative
+
+Improving audio for recognition and preserving it as evidence are incompatible
+demands on a single file. They are not reconciled by compromise; they are
+reconciled by keeping two renditions.
+
+| | **Archive — the original** | **ASR rendition — derived** |
+|---|---|---|
+| Processing | none, ever | whatever aids recognition |
+| Hashed into the chain | yes | no |
+| Retained | per retention policy | disposable, regenerable |
+| Format | WAV PCM, capture rate, mono | 16 kHz mono |
+
+> **`SRS-DAT-11`** [M, I, AIMS] The archived recording shall be bit-identical to
+> the captured audio. No filtering, levelling, noise reduction or re-encoding
+> shall ever be applied to it.
+>
+> **`SRS-DAT-12`** [M, T, AIMS] Any rendition prepared for speech recognition
+> shall be derived from the archived original, stored separately, and shall never
+> replace it or be hashed as evidence.
+>
+> **`SRS-DAT-13`** [M, I, AIMS] The processing chain and its parameters shall be
+> versioned and recorded, so a transcript can be traced to exactly how its audio
+> was prepared and the rendition can be regenerated.
+>
+> **`SRS-DAT-14`** [S, A, AIMS] The recognition chain shall avoid aggressive
+> spectral noise reduction and fast-acting compression, both of which introduce
+> artefacts that increase hallucination in transformer-based recognisers.
+> Measured room noise concentrates at 100–300 Hz, so a high-pass at 80 Hz and
+> long-window level normalisation carry most of the benefit.
 
 ---
 
@@ -1643,6 +1804,14 @@ Each test is pass/fail on a running system, with the requirements it verifies.
 | `AT-27` | Stop the agent, then trigger from CMED | IF1-17 | CMED logs and continues; no dialog; doctor unaffected |
 | `AT-28` | Set the PC clock 10 min fast | ASM-07, GRT-04 | Recording refused; log names clock skew as the cause |
 | `AT-29` | Run 14 simulated rooms recording concurrently for one clinic-day | NFC-01, NFP-06 | No dropped segments; p95 latencies within §9.1 |
+| `AT-34` | Record 60 s of occupied room and count frames at digital zero | CAP-11 | Below 0.5%; above that the room is not commissioned |
+| `AT-35` | Compare capture through every available host API on the same room | CAP-07, CAP-08 | Native-rate low-latency path is chosen and is the least gated |
+| `AT-36` | Speak loudly from the doctor chair, quietly from the patient chair | LVL-01, LVL-03 | Quiet-talker prompt fires; loud-talker prompt does not |
+| `AT-37` | Mute the microphone at the hardware switch mid-session | LVL-04, CAP-06 | Reports a microphone problem, not a patient problem |
+| `AT-38` | Record a clinic day in a commissioned room and bucket segment lengths | SEG-07 | At least 80% within 30–60 s |
+| `AT-39` | Feed a recording whose speech sits below the fixed silence constant | SEG-06 | Segments still land in the target window; no 15 s collapse |
+| `AT-40` | Re-enrol a device with segments still in its spool | ENR-21 | Refused until the spool is drained |
+| `AT-41` | Compare the archived WAV byte-for-byte against the captured stream | DAT-11 | Identical; SHA-256 matches the chain |
 | `AT-30` | Deploy the backend during an active recording | NFR-03 | No interruption; no lost segment |
 | `AT-31` | Send a 128 KB frame | IF1 transport | Refused, connection preserved |
 | `AT-32` | Send a message with an unknown extra field | NFM-05 | Ignored; command succeeds |
@@ -1668,7 +1837,9 @@ The integration is accepted when:
 | `ENR` | AT-21 – AT-26 |
 | `GRT` | AT-04, AT-07, AT-08, AT-28 |
 | `IF1` | AT-01, AT-05, AT-06, AT-27, AT-31, AT-32 |
-| `CAP`, `SEG` | AT-01, AT-29, bench measurement |
+| `CAP` | AT-34, AT-35, AT-37, commissioning measurement |
+| `SEG` | AT-38, AT-39, AT-01 |
+| `LVL` | AT-36, AT-37 |
 | `SPL` | AT-16, AT-17, AT-20 |
 | `CHN` | AT-19, AT-33 |
 | `UPL` | AT-16, AT-18 |
@@ -1759,6 +1930,8 @@ capacity and its cost, and this specification.
 | **OD-08** | Does the overlay need a supervisor-name field for long pauses? | Clinical | Phase 3 | Affects `SRS-UIX-10` |
 | **OD-09** | Durability checkpoint interval | Measurement | Phase 3 | Must come from the fsync benchmark, not from a guess |
 | **OD-10** | Backend hosting: cloud or AIMS LAB server | AIMS LAB | Phase 4 | §10.3 vs §10.4 |
+| **OD-11** | Whether the existing speakerphone can meet §7.1a, or the microphone must be replaced | Measurement | Commissioning | Decided by `AT-34`/`AT-35`, not by opinion |
+| **OD-12** | Capture at the device's native 48 kHz rather than 44.1 kHz | AIMS LAB | Phase 1 | Removes an OS resample and makes the 16 kHz recognition decimation exact; costs 8.8% storage |
 
 ---
 
@@ -1926,7 +2099,9 @@ AIMScribe, the doctor keeps working.
 | `ENR` | Enrolment | 4 |
 | `GRT` | Grants | 5 |
 | `IF1` / `IF2` / `IF3` | Interfaces | 6 |
-| `CAP` / `SEG` / `SPL` / `CHN` / `UPL` | Capture through upload | 7.1–7.5 |
+| `CAP` | Capture and the capture path | 7.1, 7.1a |
+| `LVL` | Speech-level monitoring | 7.1b |
+| `SEG` / `SPL` / `CHN` / `UPL` | Segmentation through upload | 7.2–7.5 |
 | `SES` / `GAT` / `UIX` | Sessions, gate, overlay | 7.6–7.8 |
 | `BKD` / `ARC` | Backend and archive worker | 7.9–7.10 |
 | `DAT` | Data | 8 |
@@ -1937,6 +2112,7 @@ AIMScribe, the doctor keeps working.
 | Version | Date | Change |
 |---|---|---|
 | 1.0 | 25 August 2026 | First baseline for the CMED integration meeting |
+| 1.1 | 25 August 2026 | Sizing corrected to 14 rooms. Added the capture path (§7.1a), speech-level monitoring (§7.1b), the original/derivative rule (§8.5), the clinic register (§4.6), `SRS-ENR-21`, `SRS-SEG-06/07`, tests `AT-34`–`AT-41`, and figures 1–3. |
 
 ---
 
