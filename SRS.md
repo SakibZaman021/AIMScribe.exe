@@ -13,7 +13,7 @@
 | Relationship to other documents | Complements `CMED_INTEGRATION_README.md` (narrative) with numbered, testable requirements. |
 | Agent version | 2.3.1 |
 | Wire protocol | 2 |
-| Target deployment | 7 clinics · ~30 doctors · ~30 consulting-room PCs |
+| Target deployment | 7 clinics · 14 consulting rooms · 30 doctors · 16 enrolled laptops |
 
 ---
 
@@ -1364,7 +1364,7 @@ archive tree.
 | Agent logs | PC | 30 days |
 
 > **`SRS-DAT-07`** [M, A, AIMS] A raw-audio retention period shall be decided
-> before hardware is purchased. At 18 TB/year, retention is the single largest
+> before hardware is purchased. At 11 TB/year, retention is the single largest
 > cost driver in the system. **OD-06.**
 
 ### 8.4 Data protection
@@ -1400,8 +1400,8 @@ archive tree.
 
 | ID | Requirement | Pri | Ver |
 |---|---|---|---|
-| `SRS-NFC-01` | 7 clinics, 30 concurrent doctors, ~900 sessions/day, ~180 recording-hours/day. | M | A |
-| `SRS-NFC-02` | Sustain ≈ 57 GB/day ingest — 1.5 TB/month, 18 TB/year. | M | A |
+| `SRS-NFC-01` | 7 clinics, 14 consulting rooms, 30 doctors across two shifts, ~560 sessions/day, ~112 recording-hours/day. Peak concurrency is 14, bounded by rooms rather than doctors. | M | A |
+| `SRS-NFC-02` | Sustain ≈ 36 GB/day ingest — 0.9 TB/month, 11 TB/year. | M | A |
 | `SRS-NFC-03` | Absorb a 3× burst for one hour without loss, by spooling. | M | A |
 | `SRS-NFC-04` | Support 2× growth without architectural change. | S | A |
 
@@ -1463,12 +1463,15 @@ archive tree.
 
 | Parameter | Value | Source |
 |---|---|---|
-| Clinics | 7 | Deployment plan |
-| Doctors | 30 | Deployment plan |
-| Consultations per doctor per day | 30 | Clinic observation |
-| Sessions per day | 900 | Derived |
+| Clinics | 7 | 6 Aalo clinics + Amader Susastho |
+| **Consulting rooms** | **14** | Deployment plan |
+| **Peak concurrent recordings** | **14** | A room records one consultation at a time |
+| Enrolled laptops | 16 | One per room, plus two spares |
+| Doctors | 30 | Two shifts share the same rooms |
+| Room hours per day | 8 | Morning and afternoon shift |
+| Recording-hours per day | 112 | 14 rooms × 8 h |
 | Mean consultation | 12 min | Estimate — **OD-05** |
-| Recording-hours per day | 180 | Derived |
+| Sessions per day | ~560 | Derived |
 | Audio bitrate | 88,200 B/s | `SRS-CAP-01` |
 | Per recorded hour | 318 MB | Derived |
 
@@ -1476,25 +1479,30 @@ archive tree.
 
 | Quantity | Value |
 |---|---|
-| Segments per day | ~21,600 |
-| API requests per day | ~68,000 |
-| **Mean request rate** | **~2.5 req/s** |
-| Peak request rate (3×) | ~8 req/s |
-| **Daily ingest** | **~57 GB** |
-| Monthly | ~1.5 TB |
-| Annual | ~18 TB |
-| API tier throughput incl. read-back | **~5.3 MB/s ≈ 42 Mbit/s** |
+| Segments per day | ~9,000 |
+| API requests per day | ~28,000 |
+| **Mean request rate** | **~1.2 req/s** |
+| Peak request rate (3×) | ~4 req/s |
+| **Daily ingest** | **~36 GB** |
+| Monthly | ~0.9 TB |
+| Annual | ~11 TB |
+| API tier throughput incl. read-back | **~2.5 MB/s ≈ 20 Mbit/s** |
 
 > **This is not a compute-bound system. It is a storage-and-bandwidth-bound one.**
 
-2.5 requests per second is trivial — a single modest instance handles it with
-room to spare. 57 GB per day is not trivial, and it arrives every working day
-whether anyone is watching.
+A little over one request per second is trivial — a single modest instance
+handles it with room to spare. 36 GB per day is not trivial, and it arrives every
+working day whether anyone is watching.
+
+**Size this system by rooms, not by doctors.** A consulting room records one
+consultation at a time, so 30 doctors sharing 14 rooms across two shifts produce
+14 concurrent recordings, not 30. Every figure above follows from the room
+count.
 
 **Do not size the API tier from the request rate alone.** Because
 `SRS-UPL-02` re-reads and re-hashes every segment server-side, the API tier
-carries the full audio volume in both directions. It needs about 42 Mbit/s of
-sustained throughput, not the near-zero that 2.5 req/s would suggest. It also
+carries the full audio volume in both directions. It needs about 20 Mbit/s of
+sustained throughput, not the near-zero that 1.2 req/s would suggest. It also
 holds one segment in memory per in-flight commit, and hashing runs on a bounded
 thread pool — so instance memory and pool size are real parameters, not
 defaults to leave alone.
@@ -1505,7 +1513,7 @@ defaults to leave alone.
 |---|---|---|
 | API | 2 × (1 vCPU, 2 GB RAM) | One handles the load. Two exist for zero-downtime deploys and for one failing. |
 | Database | Managed Postgres, 1–4 vCPU autoscaling, 100 GB, autosuspend **off** | Metadata is small; suspend adds cold-start latency to a clinical path |
-| Object storage | S3-compatible, no egress fees | Egress fees on 18 TB/year dominate every other cost |
+| Object storage | S3-compatible, no egress fees | Egress fees on 11 TB/year dominate every other cost |
 | Cache / queue | Redis, 256 MB | Rate limits, job coordination |
 | Estimated | **USD 120–200/month** | Excludes archive storage and the out-of-scope AI pipeline |
 
@@ -1520,8 +1528,8 @@ than assuming when choosing an instance family.
 | CPU | 16 cores | 8 would serve; 16 leaves room for the AI pipeline on the same box |
 | RAM | 64 GB ECC | ECC is not optional for a system whose purpose is detecting corruption |
 | Database disk | 500 GB NVMe **with power-loss protection** | See below |
-| Bulk storage | 8 × 12 TB, RAIDZ2 → ~60 TB usable | ~3 years at 18 TB/year |
-| Network | **100–200 Mbit/s symmetric** | See below |
+| Bulk storage | 8 × 12 TB, RAIDZ2 → ~60 TB usable | ~5 years at 11 TB/year |
+| Network | **50–100 Mbit/s symmetric** | See below |
 | Power | UPS with clean shutdown | See below |
 | OS | Linux, containerised deployment | Same image as cloud (`SRS-NFM-03`) |
 
@@ -1545,23 +1553,23 @@ moment it matters.
 
 ### 10.5 Per-clinic network
 
-| Doctors at site | Sustained upload needed |
+| Rooms at site | Sustained upload needed |
 |---|---|
-| 3 | ~2 Mbit/s |
-| 5 | ~3.5 Mbit/s |
-| 8 | ~5.5 Mbit/s |
+| 2 (the average across 7 sites) | ~1.4 Mbit/s |
+| 3 | ~2.1 Mbit/s |
+| 4 | ~2.8 Mbit/s |
 
 Modest — but sustained for six hours, and the spool covers the gaps rather than
 the link being sized for the peak.
 
 ### 10.6 Growth
 
-| Scale | Doctors | Daily | Annual | What changes |
+| Scale | Rooms | Daily | Annual | What changes |
 |---|---|---|---|---|
-| Today | 30 | 57 GB | 18 TB | — |
-| 2× | 60 | 114 GB | 42 TB | Storage only |
-| 5× | 150 | 285 GB | 104 TB | Storage, plus a second API instance genuinely needed |
-| 10× | 300 | 570 GB | 208 TB | Storage tiering; regional deployment |
+| Today | 14 | 36 GB | 11 TB | — |
+| 2× | 28 | 71 GB | 22 TB | Storage only |
+| 5× | 70 | 178 GB | 55 TB | Storage, plus a second API instance genuinely needed |
+| 10× | 140 | 356 GB | 111 TB | Storage tiering; regional deployment |
 
 At every scale the first constraint is archive retention, not compute. This is
 `SRS-DAT-07` and **OD-06** restated as a growth curve.
@@ -1634,7 +1642,7 @@ Each test is pass/fail on a running system, with the requirements it verifies.
 | `AT-26` | Revoke a device, then attempt to upload | ENR-15, ENR-16 | Refused at every route |
 | `AT-27` | Stop the agent, then trigger from CMED | IF1-17 | CMED logs and continues; no dialog; doctor unaffected |
 | `AT-28` | Set the PC clock 10 min fast | ASM-07, GRT-04 | Recording refused; log names clock skew as the cause |
-| `AT-29` | Run 30 simulated doctors for one clinic-day | NFC-01, NFP-06 | No dropped segments; p95 latencies within §9.1 |
+| `AT-29` | Run 14 simulated rooms recording concurrently for one clinic-day | NFC-01, NFP-06 | No dropped segments; p95 latencies within §9.1 |
 | `AT-30` | Deploy the backend during an active recording | NFR-03 | No interruption; no lost segment |
 | `AT-31` | Send a 128 KB frame | IF1 transport | Refused, connection preserved |
 | `AT-32` | Send a message with an unknown extra field | NFM-05 | Ignored; command succeeds |
@@ -1746,7 +1754,7 @@ capacity and its cost, and this specification.
 | **OD-03** | Clinic mismatch: refuse (recommended) or warn-and-record for the pilot? | Joint | Phase 1 | Default is refuse, per `SRS-GRT-10` |
 | **OD-04** | What share of consultations end without a prescription being built? | CMED / clinical | Phase 3 | Decides whether the gate also needs an inactivity timeout |
 | **OD-05** | Mean consultation duration — measured, not estimated | Clinical | Phase 4 | §10 sizing scales linearly with it |
-| **OD-06** | Raw-audio retention period | AIMS LAB | Hardware purchase | 18 TB/year; the single largest cost driver |
+| **OD-06** | Raw-audio retention period | AIMS LAB | Hardware purchase | 11 TB/year; the single largest cost driver |
 | **OD-07** | Stop/pause reason vocabulary, and which reasons count as abnormal | Clinical | Phase 3 | The overlay cannot be built without the list |
 | **OD-08** | Does the overlay need a supervisor-name field for long pauses? | Clinical | Phase 3 | Affects `SRS-UIX-10` |
 | **OD-09** | Durability checkpoint interval | Measurement | Phase 3 | Must come from the fsync benchmark, not from a guess |

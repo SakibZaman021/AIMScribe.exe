@@ -9,7 +9,7 @@ Prepared by AIMS LAB · Independent University, Bangladesh.
 | Date | 22 August 2026 |
 | Agent version | 2.3.1 |
 | Wire protocol | 2 |
-| Target deployment | 7 clinics · ~30 doctors · ~30 laptops |
+| Target deployment | 7 clinics · 14 consulting rooms · 30 doctors · 16 enrolled laptops |
 | Status | Design baseline for integration. Sections marked **DECISION** need your answer. |
 | Out of scope | The ASR (speech-to-text) and NER (entity extraction) pipeline. Those run entirely inside AIMS LAB, downstream of everything described here, and require nothing from CMED. |
 
@@ -858,11 +858,14 @@ challenge the assumptions rather than the conclusions.
 | Input | Value | Source |
 |---|---|---|
 | Clinics | 7 | Deployment |
-| Doctors / concurrent devices at peak | 30 | Deployment |
-| Consultations per doctor per day | 30 | Observed clinic pressure |
-| Sessions per day | **900** | 30 × 30 |
+| **Consulting rooms** | **14** | Deployment — 6 Aalo clinics + Amader Susastho |
+| **Concurrent recordings at peak** | **14** | A room records one consultation at a time |
+| Enrolled laptops | 16 | One per room, plus two spares |
+| Doctors | 30 | Two shifts share the same rooms |
+| Room hours per day | 8 h | Morning and afternoon shift |
+| Recording hours per day | **112 h** | 14 rooms × 8 h |
 | Mean consultation | 12 min | Observed |
-| Recording hours per day | **180 h** | 900 × 12 min |
+| Sessions per day | **≈ 560** | 112 h ÷ 12 min |
 | Audio bitrate | 88.2 KB/s | WAV PCM 44.1 kHz mono 16-bit |
 | Per recording hour | 318 MB | 88.2 KB/s × 3600 |
 | Mean segment | 45 s ≈ 4 MB | 30–60 s window |
@@ -871,28 +874,33 @@ challenge the assumptions rather than the conclusions.
 
 | Quantity | Derivation | Result |
 |---|---|---|
-| Aggregate ingest | 30 × 88.2 KB/s | **2.65 MB/s ≈ 21 Mbit/s** |
-| Segments per day | 180 h × 3600 ÷ 45 s | **14,400** |
-| Segment rate at peak | 30 devices ÷ 45 s | **0.67 /s** |
-| API requests, steady | 0.67×2 (authorize+commit) + 1.0 (heartbeat) + sessions | **≈ 2.5 req/s** |
-| API requests, design peak | 10× for reconnect storms and spool drain | **25 req/s** |
-| API tier bandwidth | ingest + hash read-back (2.65 MB/s each way) | **≈ 5.3 MB/s ≈ 42 Mbit/s** |
-| Audio per day | 180 h × 318 MB | **≈ 57 GB/day** |
-| Audio per month | × 26 working days | **≈ 1.5 TB/month** |
-| Audio per year | | **≈ 18 TB/year** |
-| Database rows per day | 900 sessions + 14,400 segments + ~16,000 chain/audit | **≈ 32,000/day** |
-| Database growth | ~500 B/row with indexes | **≈ 6 GB/year** |
+| Aggregate ingest | 14 × 88.2 KB/s | **1.23 MB/s ≈ 10 Mbit/s** |
+| Segments per day | 112 h × 3600 ÷ 45 s | **≈ 9,000** |
+| Segment rate at peak | 14 rooms ÷ 45 s | **0.31 /s** |
+| API requests, steady | 0.31×2 (authorize+commit) + 0.53 (heartbeat) + sessions | **≈ 1.2 req/s** |
+| API requests, design peak | 10× for reconnect storms and spool drain | **12 req/s** |
+| API tier bandwidth | ingest + hash read-back (1.23 MB/s each way) | **≈ 2.5 MB/s ≈ 20 Mbit/s** |
+| Audio per day | 112 h × 318 MB | **≈ 36 GB/day** |
+| Audio per month | × 26 working days | **≈ 0.9 TB/month** |
+| Audio per year | × 312 working days | **≈ 11 TB/year** |
+| Database rows per day | 560 sessions + 9,000 segments + ~10,000 chain/audit | **≈ 20,000/day** |
+| Database growth | ~500 B/row with indexes | **≈ 4 GB/year** |
 
 **The headline conclusion, stated plainly: this is not a compute-bound system, it
-is a storage-and-bandwidth-bound one.** Two and a half requests per second is a
-trivial load for any modern server. Fifty-seven gigabytes a day is not trivial at
+is a storage-and-bandwidth-bound one.** Roughly one request per second is a
+trivial load for any modern server. Thirty-six gigabytes a day is not trivial at
 all, and it arrives every working day whether anyone is watching or not.
+
+**Size the fleet by rooms, not by doctors.** A consulting room records one
+consultation at a time, so 30 doctors sharing 14 rooms across two shifts produce
+14 concurrent recordings, not 30. Every figure in this section is derived from
+the room count for that reason.
 
 **One CPU cost is easy to miss.** `POST /segment/commit` reads every segment back
 out of object storage and re-hashes it on the API server before accepting it.
 That is the check that makes the whole integrity chain meaningful, and it means
 the API tier carries the full audio volume in *both* directions — it is not a
-thin control plane. At 2.65 MB/s with SHA-NI hardware acceleration the hashing
+thin control plane. At 1.23 MB/s with SHA-NI hardware acceleration the hashing
 itself is well under 1% of one core, but the bandwidth and the transient memory
 (one segment per in-flight commit) are real and are budgeted above.
 
@@ -901,7 +909,7 @@ itself is well under 1% of one core, but the bandwidth and the transient memory
 | Component | Specification | Rationale |
 |---|---|---|
 | API — Render | **2 × (1 vCPU, 2 GB)** Standard | Two for zero-downtime deploys and single-instance failure, **not** for throughput. One handles the load. |
-| PostgreSQL — Neon | **1–4 CU autoscaling, 8 GB**, autosuspend **off**, PITR 30 d | §9. Compute is oversized for 2.5 req/s; the floor exists to remove cold starts. |
+| PostgreSQL — Neon | **1–4 CU autoscaling, 8 GB**, autosuspend **off**, PITR 30 d | §9. Compute is oversized for 1.2 req/s; the floor exists to remove cold starts. |
 | Object storage — Cloudflare R2 | Pay-as-you-go, lifecycle rules | **No egress fees** — decisive, given we read every segment back for verification. ~432k class-A and ~864k class-B operations/month. |
 | Redis | **256 MB** managed | Job queue only. Not a datastore. |
 | Archive worker | **1 vCPU, 2 GB** | Polls every 30 s, batch of 5. |
@@ -918,10 +926,10 @@ If the backend is hosted in-house instead. Minimum, then recommended.
 | RAM | 32 GB ECC | **64 GB ECC** | Postgres `shared_buffers` 8 GB, `effective_cache_size` 24 GB, 2×2 GB API, 1 GB Redis, 2 GB MinIO, OS page cache. ECC is not optional for a system whose value is integrity. |
 | OS / application disk | 250 GB NVMe, mirrored | 500 GB NVMe, mirrored | |
 | Database disk | **500 GB NVMe, RAID 1, with power-loss protection** | 1 TB NVMe, RAID 1, PLP, separate WAL device | **The number that matters is fsync latency, not capacity.** Target p99 under 1 ms. Consumer SSDs without PLP lie about flush completion — which is precisely the failure this architecture is built to detect. |
-| Audio staging | 4 TB NVMe or SAS SSD | 8 TB | ~57 GB/day, held until archived and receipted. Two weeks of buffer if the archive path stalls. |
-| Long-term archive | **6 × 8 TB in RAID 6 = 32 TB usable** | **8 × 12 TB in ZFS RAIDZ2 = 60 TB usable** | 18 TB/year raw. RAIDZ2 preferred for end-to-end checksums and scrub. |
+| Audio staging | 2 TB NVMe or SAS SSD | 4 TB | ~36 GB/day, held until archived and receipted. Over a month of buffer if the archive path stalls. |
+| Long-term archive | **6 × 8 TB in RAID 6 = 32 TB usable** | **8 × 12 TB in ZFS RAIDZ2 = 60 TB usable** | 11 TB/year raw — about 3 years at the minimum, 5 at the recommendation. RAIDZ2 preferred for end-to-end checksums and scrub. |
 | Network — LAN | 1 GbE | 2 × 1 GbE bonded | |
-| Network — WAN uplink | **100 Mbit/s symmetric** | 200 Mbit/s symmetric | 42 Mbit/s sustained (§10.2) plus catch-up bursts. Symmetric matters: this is an *upload*-dominated system and most Bangladeshi business links are not. |
+| Network — WAN uplink | **50 Mbit/s symmetric** | 100 Mbit/s symmetric | 20 Mbit/s sustained (§10.2) plus catch-up bursts after an outage, which is what the headroom is for. Symmetric matters: this is an *upload*-dominated system and most Bangladeshi business links are not. |
 | Power | **UPS, mandatory** | UPS + generator transfer | A server without a UPS invalidates every durability guarantee that depends on fsync reaching the medium. |
 | Offsite copy | **Required** | Nightly to cloud object storage | RAID is not a backup. RAID survives a disk; it does not survive a fire, a theft, or a mistaken `rm`. |
 
@@ -931,8 +939,10 @@ Each clinic uploads independently over the public internet.
 
 | Quantity | Value |
 |---|---|
-| Laptops per clinic | 4–5 |
-| Sustained upstream per clinic | 5 × 88.2 KB/s ≈ **3.5 Mbit/s** |
+| Rooms per clinic | 2 on average across 7 sites |
+| Sustained upstream, 2 rooms | 2 × 88.2 KB/s ≈ **1.4 Mbit/s** |
+| Sustained upstream, 3 rooms | ≈ **2.1 Mbit/s** |
+| Sustained upstream, 4 rooms | ≈ **2.8 Mbit/s** |
 | Recommended upstream per clinic | **10 Mbit/s** minimum, 20 Mbit/s preferred |
 
 The 20 Mbit/s recommendation is for **catch-up, not steady state**. Each laptop
@@ -947,17 +957,17 @@ Storage scales linearly with recording hours and nothing else.
 
 | Scale | Devices | Audio/day | Audio/year | Change needed |
 |---|---|---|---|---|
-| Today | 30 | 57 GB | 18 TB | — |
-| 2× | 60 | 114 GB | 36 TB | Storage only. API and database untouched. |
-| 5× | 150 | 285 GB | 90 TB | Add one API instance; Neon ceiling to 8 CU; storage. |
-| 10× | 300 | 570 GB | 180 TB | Archive tiering becomes mandatory; consider regional ingest. |
+| Today | 14 | 36 GB | 11 TB | — |
+| 2× | 28 | 71 GB | 22 TB | Storage only. API and database untouched. |
+| 5× | 70 | 178 GB | 55 TB | Add one API instance; Neon ceiling to 8 CU; storage. |
+| 10× | 140 | 356 GB | 111 TB | Archive tiering becomes mandatory; consider regional ingest. |
 
 The API and database tiers have roughly an order of magnitude of headroom at the
 recommended specification. **The first constraint you will hit, at every scale, is
 archive storage — plan retention policy before you plan hardware.**
 
 **DECISION (AIMS LAB, not CMED):** retention period for raw audio. Retaining
-everything forever is 18 TB per year, growing. A defined retention policy —
+everything forever is 11 TB per year, growing. A defined retention policy —
 90 days hot, then cold storage or deletion under the purge-receipt mechanism —
 changes the storage line by an order of magnitude.
 
