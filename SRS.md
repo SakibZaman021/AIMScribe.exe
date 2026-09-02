@@ -7,7 +7,7 @@
 | | |
 |---|---|
 | Document | AIMS-SRS-001 |
-| Version | 1.3 |
+| Version | 1.4 |
 | Date | 25 August 2026 |
 | Status | Baseline for integration. Items marked **OD-nn** are open and need a decision. |
 | Relationship to other documents | Complements `CMED_INTEGRATION_README.md` (narrative) with numbered, testable requirements. |
@@ -1331,14 +1331,41 @@ the difference between two very different failures:
 | Corruption in object storage | **intact** | re-upload to a fresh key |
 | Local file decayed on disk | **damaged** | do not retry; escalate, keep, and mark it |
 
-The agent holds everything needed to distinguish them — the sealed segment, and
-the chain entry recording its SHA-256 at seal time — and never compares the two.
-On a fleet uploading over intermittent links, transit corruption is far the most
-likely cause, and it is the one case where the recording is entirely recoverable.
+**Local damage is already caught, and caught early.** `SessionSpool.read_segment`
+decrypts and re-verifies the segment against its recorded hash *before every
+upload attempt*, and a failure quarantines it locally as
+`local_segment_unreadable` without ever sending it. So by the time a segment
+reaches the server, its bytes were verified good microseconds earlier.
+
+That has a sharp consequence: **a server-side hash mismatch is almost never
+damaged audio.** The local original was intact when it left. What is missing is
+not another local check but a retry after a server rejection — the agent
+quarantines and stops instead of re-reading and trying again.
+
+**And most quarantines are not about the audio at all.** Of the five triggers in
+§7.5a.1 below, only one concerns the audio bytes; the rest are chain ordering
+and continuity failures, where every second of the recording is perfectly
+intact. A dropped pause entry once quarantined a real consultation whose audio
+was flawless.
+
+#### 7.5a.1 Every way a session can be quarantined
+
+| # | Trigger | Where | Is the audio damaged? | Likely cause |
+|---|---|---|---|---|
+| 1 | `local_segment_unreadable` | agent, before upload | **Yes, possibly** | Disk bit-rot over the 3-week spool window; truncated write after power loss; filesystem damage; a bit flipped in non-ECC RAM between encrypt and write; antivirus altering the file; a DPAPI key that no longer decrypts after a profile rebuild |
+| 2 | `segment hash mismatch on arrival` | backend, at commit | **No** — it was verified on read | Upload truncated by a dropped connection; presigned URL expiring mid-PUT; a retried PUT leaving a partial object; a fault on the storage side |
+| 3 | `chain entry rejected` | backend, at commit | **No** | An entry arriving before its predecessor; a dropped pause or resume breaking `prev_hash` continuity; a device key that no longer matches |
+| 4 | `duplicate seq_no with a different hash` | backend, at commit | **No** | A commit that succeeded but whose response was lost, retried with different bytes; two agent instances running against one spool |
+| 5 | Whole-chain verification fails | backend, at close | **No** | Any gap, break or bad signature accumulated across the session |
+
+Only row 1 means the recording itself is at risk, and row 1 is detected on the
+consulting-room PC and never reaches the server. Rows 2 to 5 describe a
+consultation whose audio is complete and correct, held back by a defect in the
+paperwork around it. That is the case `SRS-REC-07` exists to serve.
 
 | ID | Requirement | Pri | Ver | Owner |
 |---|---|---|---|---|
-| `SRS-REC-01` | On a rejected segment the agent shall re-hash the local file and compare it against the SHA-256 recorded in that segment's chain entry. | M | T | AIMS |
+| `SRS-REC-01` | On a **server-side** rejection the agent shall re-run its existing local verification (`read_segment`) and, if it passes, treat the failure as recoverable rather than terminal. | M | T | AIMS |
 | `SRS-REC-02` | If the local hash matches, the segment shall be re-uploaded to a **fresh object key** and re-committed. The suspect object shall not be overwritten; it is evidence of the failure. | M | T | AIMS |
 | `SRS-REC-03` | Retries shall be bounded — at most three, with growing delay. A rejected segment shall not be retried on every drain tick. | M | T | AIMS |
 | `SRS-REC-04` | If the local hash does **not** match, the agent shall stop retrying, keep the file, and raise a distinct alert naming local media corruption as the cause. | M | T | AIMS |
@@ -2239,6 +2266,7 @@ their entire integration is the WebSocket, which Postman is the wrong tool for.
 | Version | Date | Change |
 |---|---|---|
 | 1.0 | 25 August 2026 | First baseline for the CMED integration meeting |
+| 1.4 | 25 August 2026 | Corrected §7.5a: the agent already re-verifies every segment locally before upload, so local damage is caught before it leaves the PC and a server-side mismatch is almost never damaged audio. Added §7.5a.1 enumerating all five quarantine triggers and which of them involve the recording at all — only one does, and it never reaches the server. |
 | 1.3 | 25 August 2026 | Added §7.5a `SRS-REC-01`–`09` and tests `AT-42`–`AT-46`: local re-verification before giving up, bounded retry to a fresh object key, per-segment rather than per-session quarantine, an un-quarantine path, preservation of unverifiable audio outside the chain, and central visibility of stuck local audio. |
 | 1.2 | 25 August 2026 | Figures regenerated from a layout pass that fails the build on any label collision. Added Appendix C (API reference and testability, `SRS-API-01`–`04`) and `SRS-IF1-16/18`: CMED renders nothing; all doctor messaging is delivered by our overlay. |
 | 1.1 | 25 August 2026 | Sizing corrected to 14 rooms. Added the capture path (§7.1a), speech-level monitoring (§7.1b), the original/derivative rule (§8.5), the clinic register (§4.6), `SRS-ENR-21`, `SRS-SEG-06/07`, tests `AT-34`–`AT-41`, and figures 1–3. |
