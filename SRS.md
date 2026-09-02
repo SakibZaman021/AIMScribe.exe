@@ -7,7 +7,7 @@
 | | |
 |---|---|
 | Document | AIMS-SRS-001 |
-| Version | 1.1 |
+| Version | 1.2 |
 | Date | 25 August 2026 |
 | Status | Baseline for integration. Items marked **OD-nn** are open and need a decision. |
 | Relationship to other documents | Complements `CMED_INTEGRATION_README.md` (narrative) with numbered, testable requirements. |
@@ -1061,9 +1061,20 @@ seconds later.
 | `gate_armed` | Flag accepted | Optional |
 | `warning` | Disk low, microphone lost, backend unreachable | Optionally surface to the doctor |
 
-> **`SRS-IF1-16`** [S, D, CMED] CMED should display a small, unobtrusive
-> recording indicator driven by these events. It shall not be modal and shall
-> never block clinical work.
+> **`SRS-IF1-16`** [M, I, AIMS] **CMED shall not be required to render anything.**
+> Every message intended for the doctor — recording state, gate state, level
+> prompts, disk and microphone warnings, errors — shall be delivered by the
+> AIMScribe overlay (§7.8), which AIMS LAB builds and controls.
+>
+> **`SRS-IF1-18`** [C, D, CMED] CMED *may* additionally show its own indicator
+> from the pushed events, but nothing in this specification depends on it and
+> the system is fully usable when CMED renders nothing at all.
+
+This is a deliberate consequence of the constraint that CMED will not modify its
+software beyond sending two signals. If doctor-facing messaging depended on
+CMED's user interface, every future message would require a CMED release. It
+does not: the overlay is ours, so we can change what a doctor is told without
+asking anyone.
 
 #### 6.1.7 When the agent is absent
 
@@ -2089,7 +2100,75 @@ Those two `.catch(() => {})` calls are the most important lines in the
 integration. They are `SRS-IF1-17` expressed in code: whatever goes wrong in
 AIMScribe, the doctor keeps working.
 
-### Appendix C — Requirement index
+### Appendix C — API reference
+
+Two surfaces. CMED implements only the first, and only two of its commands.
+
+#### C.1 Partner → agent, on the consulting-room PC
+
+`ws://127.0.0.1:5050/ws` · JSON frames · 64 KB maximum · `Origin` mandatory
+
+| Command | Sent when | Required fields | Success |
+|---|---|---|---|
+| `start` | Doctor opens patient details | `patient_id`, `doctor_id`, `clinic_id`, `start_time`, `date`, `consent_obtained` | `200 RECORDING_STARTED` |
+| `consultation_complete` | Prescription built | `patient_id`, `occurred_at` | `200 GATE_ARMED` |
+| `status` | Any time | — | current state |
+| `pause` · `resume` · `stop` | Not used by CMED | — | — |
+
+`GET http://127.0.0.1:5050/health` is unauthenticated, has no side effects, and
+is the correct way to ask whether the agent is present. Full outcome tables are
+in Appendix A.
+
+#### C.2 Agent and worker → AIMS LAB backend
+
+Internal to AIMS LAB. Listed so a partner's reviewer can see the whole chain of
+custody; CMED calls none of it.
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| POST | `/api/v2/device/enroll` | enrolment token | Exchange a one-time token for a device identity |
+| POST | `/api/v2/grant/mint` | device token | Authorise one consultation *(to be built, §5)* |
+| POST | `/api/v2/session/open` | device token | Open a session, submit chain entry 0 |
+| POST | `/api/v2/segment/authorize` | device token | Presigned PUT for one segment, 300 s |
+| POST | `/api/v2/segment/commit` | device token | Declare uploaded, with SHA-256; server re-reads and re-hashes |
+| POST | `/api/v2/session/pause` · `/resume` | device token | Supervised pause with its reason |
+| POST | `/api/v2/session/close` | device token | Close and submit the chain tail |
+| GET | `/api/v2/session/{id}/receipts` | device token | Collect purge receipts |
+| POST | `/api/v2/heartbeat` | device token | Liveness, spool depth, version, level metrics |
+| GET | `/api/v2/doctors` | device token | Typing suggestions, own clinic only |
+| GET | `/api/v2/archive/pending` | worker key | Sessions ready to archive |
+| POST | `/api/v2/archive/complete` | worker key | Report an archived session |
+| POST | `/api/v2/admin/hospital` · `/doctor` | admin key | Register a clinic or a doctor |
+| POST | `/api/v2/admin/enrollment-token` | admin key | Mint a single-use enrolment token |
+| POST | `/api/v2/admin/device/{id}/revoke` | admin key | Cut off a lost machine |
+| GET | `/api/v2/admin/alerts` | admin key | Unresolved integrity alerts |
+
+Three separate bearer credentials — `X-Device-Token`, `X-Worker-Key`,
+`X-Admin-Key` — which are not interchangeable (`SRS-IF2-02`).
+
+#### C.3 Testability
+
+> **`SRS-API-01`** [M, D, AIMS] A Postman collection shall be published covering
+> every route in C.2, with an environment file holding base URL and credentials
+> as variables, so no secret is committed with the collection.
+>
+> **`SRS-API-02`** [M, D, AIMS] The collection shall include a working
+> end-to-end sequence — enrol, mint, open, authorize, commit, close, receipts —
+> that a reviewer can run against a staging deployment without reading code.
+>
+> **`SRS-API-03`** [M, I, AIMS] The backend shall serve OpenAPI at `/openapi.json`
+> and interactive documentation at `/docs`, so the collection can be regenerated
+> rather than hand-maintained.
+>
+> **`SRS-API-04`** [S, D, AIMS] A partner-facing WebSocket test page shall be
+> provided — a single HTML file that connects to `127.0.0.1:5050`, sends a
+> trigger and a flag, and prints the replies — because Postman does not exercise
+> the loopback WebSocket surface CMED actually implements.
+
+`SRS-API-04` matters more than the Postman collection for CMED specifically:
+their entire integration is the WebSocket, which Postman is the wrong tool for.
+
+### Appendix D — Requirement index
 
 | Prefix | Area | § |
 |---|---|---|
@@ -2107,11 +2186,12 @@ AIMScribe, the doctor keeps working.
 | `DAT` | Data | 8 |
 | `NFP` / `NFC` / `NFR` / `NFS` / `NFO` / `NFM` / `NFU` | Non-functional | 9 |
 
-### Appendix D — Document history
+### Appendix E — Document history
 
 | Version | Date | Change |
 |---|---|---|
 | 1.0 | 25 August 2026 | First baseline for the CMED integration meeting |
+| 1.2 | 25 August 2026 | Figures regenerated from a layout pass that fails the build on any label collision. Added Appendix C (API reference and testability, `SRS-API-01`–`04`) and `SRS-IF1-16/18`: CMED renders nothing; all doctor messaging is delivered by our overlay. |
 | 1.1 | 25 August 2026 | Sizing corrected to 14 rooms. Added the capture path (§7.1a), speech-level monitoring (§7.1b), the original/derivative rule (§8.5), the clinic register (§4.6), `SRS-ENR-21`, `SRS-SEG-06/07`, tests `AT-34`–`AT-41`, and figures 1–3. |
 
 ---
