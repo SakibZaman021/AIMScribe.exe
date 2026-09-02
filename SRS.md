@@ -7,7 +7,7 @@
 | | |
 |---|---|
 | Document | AIMS-SRS-001 |
-| Version | 1.2 |
+| Version | 1.3 |
 | Date | 25 August 2026 |
 | Status | Baseline for integration. Items marked **OD-nn** are open and need a decision. |
 | Relationship to other documents | Complements `CMED_INTEGRATION_README.md` (narrative) with numbered, testable requirements. |
@@ -1314,6 +1314,48 @@ chain decorative, since a corrupted upload would be recorded as verified.
 **On `SRS-UPL-04`.** Object keys leak into access logs, metrics dashboards and
 error traces. A patient reference in a key is a patient reference in all three.
 
+### 7.5a Recovering audio that failed verification — `REC`
+
+**The gap this closes.** Today a hash mismatch stops the session dead. The
+uploader sees a quarantined segment, logs, emits one alert and `continue`s — for
+that session, permanently. The audio stays sealed on the consulting-room PC and
+**never reaches the server at all**. On restart the session is re-adopted from
+its journal, reaches the same check, and stops again.
+
+Stopping is right; stopping *forever* is not. The agent cannot currently tell
+the difference between two very different failures:
+
+| Cause | Local original | Correct response |
+|---|---|---|
+| Corruption in transit | **intact** | re-upload — the bytes on disk are good |
+| Corruption in object storage | **intact** | re-upload to a fresh key |
+| Local file decayed on disk | **damaged** | do not retry; escalate, keep, and mark it |
+
+The agent holds everything needed to distinguish them — the sealed segment, and
+the chain entry recording its SHA-256 at seal time — and never compares the two.
+On a fleet uploading over intermittent links, transit corruption is far the most
+likely cause, and it is the one case where the recording is entirely recoverable.
+
+| ID | Requirement | Pri | Ver | Owner |
+|---|---|---|---|---|
+| `SRS-REC-01` | On a rejected segment the agent shall re-hash the local file and compare it against the SHA-256 recorded in that segment's chain entry. | M | T | AIMS |
+| `SRS-REC-02` | If the local hash matches, the segment shall be re-uploaded to a **fresh object key** and re-committed. The suspect object shall not be overwritten; it is evidence of the failure. | M | T | AIMS |
+| `SRS-REC-03` | Retries shall be bounded — at most three, with growing delay. A rejected segment shall not be retried on every drain tick. | M | T | AIMS |
+| `SRS-REC-04` | If the local hash does **not** match, the agent shall stop retrying, keep the file, and raise a distinct alert naming local media corruption as the cause. | M | T | AIMS |
+| `SRS-REC-05` | The backend shall quarantine the **segment**, and shall quarantine the session only once retries are exhausted. | M | T | AIMS |
+| `SRS-REC-06` | An administrator shall be able to clear a session's quarantine after a verified re-upload, so a recovered session can be archived. | M | T | AIMS |
+| `SRS-REC-07` | A segment that cannot be verified locally shall still be uploaded, to a separate `quarantine/` prefix, outside the chain and explicitly marked unverifiable. It shall not enter the evidence archive. | M | T | AIMS |
+| `SRS-REC-08` | The agent shall report, in every heartbeat, the count and total bytes of segments held locally in a stuck state, so a PC hoarding unrecoverable audio is visible centrally rather than only in its own log file. | M | T | AIMS |
+| `SRS-REC-09` | An operator view shall list sessions stuck in quarantine across the fleet, with clinic, room, age and size. | M | D | AIMS |
+
+**On `SRS-REC-07` — the distinction that matters.** *Evidence* and *data* are not
+the same goal. The hash chain protects evidence; a consultation whose chain broke
+still contains clinical speech that is worth keeping for research. The present
+design conflates them, so a failed verification means nothing reaches the server.
+Separating them lets both hold: the verified archive stays strictly verified, and
+the unverifiable recording is preserved with its defect recorded against it,
+rather than left on a laptop in Dholpur until the disk fills.
+
 ### 7.6 Session lifecycle and handover — `SES`
 
 | ID | Requirement | Pri | Ver | Owner |
@@ -1823,6 +1865,11 @@ Each test is pass/fail on a running system, with the requirements it verifies.
 | `AT-39` | Feed a recording whose speech sits below the fixed silence constant | SEG-06 | Segments still land in the target window; no 15 s collapse |
 | `AT-40` | Re-enrol a device with segments still in its spool | ENR-21 | Refused until the spool is drained |
 | `AT-41` | Compare the archived WAV byte-for-byte against the captured stream | DAT-11 | Identical; SHA-256 matches the chain |
+| `AT-42` | Corrupt a segment in transit, leaving the local file intact | REC-01, REC-02 | Local re-hash matches; re-uploaded to a fresh key; session completes |
+| `AT-43` | Corrupt the local segment file on disk, then let it upload | REC-01, REC-04 | Retries stop; alert names local media corruption; file kept |
+| `AT-44` | Exhaust the retry budget on one segment | REC-03, REC-05 | Exactly three attempts; session quarantines only after the third |
+| `AT-45` | Clear a quarantine after a verified re-upload | REC-06 | Session archives normally |
+| `AT-46` | Leave a session quarantined and read the heartbeat | REC-08, REC-09 | Stuck bytes reported centrally and visible in the operator view |
 | `AT-30` | Deploy the backend during an active recording | NFR-03 | No interruption; no lost segment |
 | `AT-31` | Send a 128 KB frame | IF1 transport | Refused, connection preserved |
 | `AT-32` | Send a message with an unknown extra field | NFM-05 | Ignored; command succeeds |
@@ -2181,6 +2228,7 @@ their entire integration is the WebSocket, which Postman is the wrong tool for.
 | `CAP` | Capture and the capture path | 7.1, 7.1a |
 | `LVL` | Speech-level monitoring | 7.1b |
 | `SEG` / `SPL` / `CHN` / `UPL` | Segmentation through upload | 7.2–7.5 |
+| `REC` | Recovering unverified audio | 7.5a |
 | `SES` / `GAT` / `UIX` | Sessions, gate, overlay | 7.6–7.8 |
 | `BKD` / `ARC` | Backend and archive worker | 7.9–7.10 |
 | `DAT` | Data | 8 |
@@ -2191,6 +2239,7 @@ their entire integration is the WebSocket, which Postman is the wrong tool for.
 | Version | Date | Change |
 |---|---|---|
 | 1.0 | 25 August 2026 | First baseline for the CMED integration meeting |
+| 1.3 | 25 August 2026 | Added §7.5a `SRS-REC-01`–`09` and tests `AT-42`–`AT-46`: local re-verification before giving up, bounded retry to a fresh object key, per-segment rather than per-session quarantine, an un-quarantine path, preservation of unverifiable audio outside the chain, and central visibility of stuck local audio. |
 | 1.2 | 25 August 2026 | Figures regenerated from a layout pass that fails the build on any label collision. Added Appendix C (API reference and testability, `SRS-API-01`–`04`) and `SRS-IF1-16/18`: CMED renders nothing; all doctor messaging is delivered by our overlay. |
 | 1.1 | 25 August 2026 | Sizing corrected to 14 rooms. Added the capture path (§7.1a), speech-level monitoring (§7.1b), the original/derivative rule (§8.5), the clinic register (§4.6), `SRS-ENR-21`, `SRS-SEG-06/07`, tests `AT-34`–`AT-41`, and figures 1–3. |
 
