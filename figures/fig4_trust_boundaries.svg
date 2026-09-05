@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 300" color="#1a1a1a" role="img" aria-label="Trust boundaries. The partner page can only make claims; the agent proves its identity with a device token and an Ed25519 signature; the backend authorises with a signed grant and purge receipts." font-family="Helvetica, Arial, sans-serif">
+<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker><marker id="arA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b3261e"/></marker></defs>
+<text x="40" y="34" font-size="11" fill="currentColor">Nothing the page says is trusted on its own. Every claim is checked against a register the page cannot reach.</text>
+<text x="40" y="62" font-size="10" font-weight="600" fill="#b3261e">UNTRUSTED</text>
+<rect x="40" y="74" width="240" height="80" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="160.0" y="111.27" font-size="12.5" font-weight="600" text-anchor="middle" fill="currentColor">Partner web page</text>
+<text x="160.0" y="126.19999999999999" font-size="9.5" text-anchor="middle" fill="currentColor">any page on the PC, really</text>
+<text x="460" y="62" font-size="10" font-weight="600" fill="currentColor">SEMI-TRUSTED · ENROLLED</text>
+<rect x="460" y="74" width="240" height="80" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="580.0" y="111.27" font-size="12.5" font-weight="600" text-anchor="middle" fill="currentColor">AIMScribe agent</text>
+<text x="580.0" y="126.19999999999999" font-size="9.5" text-anchor="middle" fill="currentColor">device token + private key</text>
+<text x="880" y="62" font-size="10" font-weight="600" fill="currentColor">TRUSTED · AIMS LAB</text>
+<rect x="880" y="74" width="240" height="80" rx="5" fill="none" stroke="currentColor" stroke-width="2"/>
+<text x="1000.0" y="111.27" font-size="12.5" font-weight="600" text-anchor="middle" fill="currentColor">AIMS LAB backend</text>
+<text x="1000.0" y="126.19999999999999" font-size="9.5" text-anchor="middle" fill="currentColor">grant signing key + admin key</text>
+<path d="M286,104 L454,104" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<text x="370" y="96" font-size="9.5" text-anchor="middle" fill="currentColor">claims only — never trusted</text>
+<path d="M706,104 L874,104" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<text x="790" y="96" font-size="9.5" text-anchor="middle" fill="currentColor">proves: token + signature</text>
+<path d="M874,138 L706,138" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<text x="790" y="130" font-size="9.5" text-anchor="middle" fill="currentColor">authorises: grant + receipts</text>
+<text x="40" y="200" font-size="10.5" fill="currentColor">The agent is only semi-trusted: enrolment says the machine may record at all, not that any particular request to record is legitimate.</text>
+<text x="40" y="216" font-size="10.5" fill="currentColor">That second question is the grant's, and the two must not be confused — an enrolled laptop with no grant check would record for any page the doctor visits.</text>
+</svg>

@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 380" color="#1a1a1a" role="img" aria-label="Device enrolment lifecycle. A token is minted for a clinic, staged by the installer, redeemed at first start and replaced by a stored identity. An unreachable backend does not burn the token, and a crash before the identity is written returns the machine to the staged state." font-family="Helvetica, Arial, sans-serif">
+<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker><marker id="arA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b3261e"/></marker></defs>
+<text x="40" y="34" font-size="11" fill="currentColor">One token per laptop, consumed once. The machine receives its clinic; it never asserts one.</text>
+<rect x="40" y="70" width="150" height="56" rx="8" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="115.0" y="95.39" font-size="12" font-weight="600" text-anchor="middle" fill="currentColor">Minted</text>
+<text x="115.0" y="109.72999999999999" font-size="9" text-anchor="middle" fill="currentColor">admin, per clinic</text>
+<rect x="260" y="70" width="150" height="56" rx="8" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="335.0" y="95.39" font-size="12" font-weight="600" text-anchor="middle" fill="currentColor">Staged</text>
+<text x="335.0" y="109.72999999999999" font-size="9" text-anchor="middle" fill="currentColor">installer writes it</text>
+<path d="M190,98 L254,98" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<rect x="480" y="70" width="150" height="56" rx="8" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="555.0" y="95.39" font-size="12" font-weight="600" text-anchor="middle" fill="currentColor">Enrolled</text>
+<text x="555.0" y="109.72999999999999" font-size="9" text-anchor="middle" fill="currentColor">server issues identity</text>
+<path d="M410,98 L474,98" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<rect x="700" y="70" width="150" height="56" rx="8" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="775.0" y="95.39" font-size="12" font-weight="600" text-anchor="middle" fill="currentColor">Operating</text>
+<text x="775.0" y="109.72999999999999" font-size="9" text-anchor="middle" fill="currentColor">reads device.json</text>
+<path d="M630,98 L694,98" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<rect x="920" y="70" width="150" height="56" rx="8" fill="none" stroke="currentColor" stroke-width="2"/>
+<text x="995.0" y="95.39" font-size="12" font-weight="600" text-anchor="middle" fill="currentColor">Revoked</text>
+<text x="995.0" y="109.72999999999999" font-size="9" text-anchor="middle" fill="currentColor">credential cleared</text>
+<path d="M850,98 L914,98" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<text x="225" y="90" font-size="9" text-anchor="middle" fill="currentColor">install</text>
+<text x="445" y="90" font-size="9" text-anchor="middle" fill="currentColor">redeem</text>
+<text x="665" y="90" font-size="9" text-anchor="middle" fill="currentColor">first start</text>
+<text x="885" y="90" font-size="9" text-anchor="middle" fill="currentColor">revoke</text>
+<rect x="260" y="200" width="150" height="50" rx="8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="5 4"/>
+<text x="335.0" y="222.215" font-size="11.5" font-weight="600" text-anchor="middle" fill="currentColor">Expired</text>
+<text x="335.0" y="236.435" font-size="9" text-anchor="middle" fill="currentColor">TTL elapsed</text>
+<path d="M335,126 L335,194" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<text x="345" y="165" font-size="9" fill="currentColor">unredeemed</text>
+<path d="M480,126 L480,170 L410,170 L410,126" fill="none" stroke="#b3261e" stroke-width="1.8" marker-end="url(#arA)"/>
+<text x="490" y="166" font-size="9.5" fill="#b3261e">crashed before the identity file was written — the token may be redeemed once more, by the same key, while the device has never been seen</text>
+<text x="40" y="300" font-size="10.5" fill="currentColor">A backend that is merely unreachable does not burn the token: it stays on disk and the agent retries at the next start.</text>
+<text x="40" y="316" font-size="10.5" fill="currentColor">Burning it would strand a PC in another district with a credential that cannot be reissued remotely.</text>
+</svg>

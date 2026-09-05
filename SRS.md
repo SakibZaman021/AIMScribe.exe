@@ -7,8 +7,8 @@
 | | |
 |---|---|
 | Document | AIMS-SRS-001 |
-| Version | 1.4 |
-| Date | 25 August 2026 |
+| Version | 1.5 |
+| Date | 5 September 2026 |
 | Status | Baseline for integration. Items marked **OD-nn** are open and need a decision. |
 | Relationship to other documents | Complements `CMED_INTEGRATION_README.md` (narrative) with numbered, testable requirements. |
 | Agent version | 2.3.1 |
@@ -327,50 +327,6 @@ every segment by reading it back from storage and re-hashing it. An archive
 worker inside AIMS LAB dials outward to collect verified sessions. No partner
 system ever connects to AIMS LAB infrastructure.
 
-```mermaid
-flowchart TB
-    subgraph CLINIC["Consulting room — one of ~30"]
-        direction TB
-        BR["CMED page<br/>in Chrome"]
-        subgraph AG["AIMScribe_Agent.exe"]
-            WS["Control API<br/>127.0.0.1:5050"]
-            CAP["Capture thread"]
-            SEG["Segmenter thread"]
-            SPL["Encrypted spool<br/>40 GB cap"]
-            UP["Uploader"]
-            OV["Overlay"]
-        end
-        MIC(["Microphone"])
-    end
-
-    subgraph CLOUD["AIMS LAB backend"]
-        API["FastAPI"]
-        DB[("PostgreSQL")]
-        OBJ[("Object storage")]
-    end
-
-    subgraph LAB["AIMS LAB server"]
-        WRK["Archive worker"]
-        ARC[("Archive volume")]
-        AI["ASR + NER<br/>(out of scope)"]
-    end
-
-    BR -->|"ws:// loopback<br/>trigger, flag"| WS
-    WS --> CAP
-    MIC --> CAP
-    CAP --> SEG --> SPL --> UP
-    OV -.->|stop / pause| WS
-    UP -->|"HTTPS + device token"| API
-    UP -->|"presigned PUT"| OBJ
-    API <--> DB
-    API <--> OBJ
-    WRK -->|"outbound only"| API
-    WRK --> ARC
-    ARC -.-> AI
-
-    classDef oos fill:transparent,stroke-dasharray:5 5
-    class AI oos
-```
 
 Note the direction of every arrow crossing an organisational boundary. **Nothing
 originates outside the clinic.** The archive worker dials out; it accepts no
@@ -392,61 +348,6 @@ purge receipts are issued.
 This is the answer to *"the full AIMScribe pipeline from the recording to
 AIMScribe_Backend"*. Twenty steps, one consultation.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant D as Doctor
-    participant P as CMED page
-    participant A as Agent
-    participant S as Spool
-    participant B as Backend
-    participant O as Object store
-    participant W as Archive worker
-
-    Note over A: idle, enrolled, connected
-    D->>P: opens patient details
-    P->>A: trigger (5 fields)
-    A->>A: microphone opens IMMEDIATELY
-    par capture never waits for the network
-        A->>B: mint grant for this trigger
-        B->>B: check doctor, clinic, device enrolment
-        B-->>A: signed grant, 60 s, single use
-        A->>B: session/open + chain[0], signed
-        B-->>A: session_id (ULID)
-    and
-        A->>S: audio flows to the spool from t=0
-    end
-    A-->>P: 200 RECORDING_STARTED
-    A->>P: overlay appears (red Stop, blue Pause)
-
-    loop every 30–60 s until the consultation ends
-        A->>S: seal segment, AES-256-GCM, append to chain
-        A->>B: segment/authorize
-        B-->>A: presigned PUT, 300 s
-        A->>O: upload ciphertext
-        A->>B: segment/commit + SHA-256
-        B->>O: read the object back
-        B->>B: re-hash and compare
-        B-->>A: committed
-    end
-
-    D->>P: builds the prescription
-    P->>A: consultation_complete
-    A->>A: gate ARMED
-    D->>P: opens the next patient
-    P->>A: trigger (patient 2)
-    A->>A: close session 1, open session 2, no gap
-    A->>B: session/close + chain tail
-    B->>B: verify the whole chain
-    B-->>A: purge receipts
-    A->>S: delete local audio after 24 h grace
-
-    W->>B: archive/pending
-    B-->>W: verified sessions
-    W->>O: fetch, decrypt, concatenate
-    W->>W: write PID_DID_HOSID_START_END_DATE.wav
-    W->>B: archive/complete
-```
 
 **Read step 4 and step 11 together.** Capture starts before authorisation
 finishes, and the two run in parallel. This is deliberate: a slow link must never
@@ -461,23 +362,9 @@ recording. This is `CON-08` made real.
 
 ### 3.4 Trust boundaries
 
-```mermaid
-flowchart LR
-    subgraph U["UNTRUSTED"]
-        PG["CMED page<br/>(any page, really)"]
-    end
-    subgraph SV["SEMI-TRUSTED — enrolled"]
-        AGT["Agent<br/>holds device token<br/>+ device private key"]
-    end
-    subgraph T["TRUSTED — AIMS LAB"]
-        BE["Backend<br/>holds grant private key<br/>+ admin key"]
-    end
+![Figure 3 — Trust boundaries](figures/fig4_trust_boundaries.svg)
 
-    PG -->|"claims only:<br/>patient, doctor, clinic, time"| AGT
-    AGT -->|"proves: device token<br/>+ Ed25519 signature"| BE
-    BE -->|"authorises: signed grant<br/>+ purge receipts"| AGT
-    AGT -->|"reports: status only"| PG
-```
+**Figure 3.** Trust boundaries. The partner page can only make claims; the agent proves its identity with a device token and an Ed25519 signature; the backend authorises with a signed grant and purge receipts. Nothing the page says is trusted on its own.
 
 The single most important line in this diagram is the first arrow's label:
 **claims only.** Nothing the page sends is trusted on its own. Every claim is
@@ -572,21 +459,9 @@ misconfigured deployment, so they are tabulated explicitly.
 
 ### 4.3 The enrolment lifecycle
 
-```mermaid
-stateDiagram-v2
-    [*] --> Minted: admin mints for a clinic
-    Minted --> Staged: installer writes enrollment.token
-    Staged --> Enrolled: first agent start redeems it
-    Staged --> Expired: TTL passes unredeemed
-    Enrolled --> Operating: device.json + device.token written
-    Operating --> Operating: every start reads device.json
-    Operating --> Revoked: admin revokes a lost PC
-    Revoked --> [*]
-    Expired --> [*]
+![Figure 4 — Device enrolment lifecycle](figures/fig5_enrolment_lifecycle.svg)
 
-    Staged --> Staged: backend unreachable — token NOT burned
-    Enrolled --> Staged: agent crashed before writing identity
-```
+**Figure 4.** Device enrolment lifecycle. A token is minted for a clinic, staged by the installer, redeemed at first start and replaced by a stored identity. An unreachable backend does not burn the token, and a crash before the identity is written returns the machine to the staged state.
 
 The two self-transitions at the bottom are hard-won and deserve a note each.
 
@@ -782,19 +657,9 @@ That constraint is entirely acceptable, and the design that replaces it is
 
 **Target:** grant minting moves to the AIMS LAB backend.
 
-```mermaid
-sequenceDiagram
-    participant P as CMED page
-    participant A as Agent
-    participant B as AIMS LAB backend
+![Figure 5 — Grant minting moves to the AIMS LAB backend](figures/fig6_grant_minting.svg)
 
-    P->>A: trigger — 5 plain fields, unsigned
-    A->>B: POST /grant/mint (device token)
-    Note over B: validate against OUR register:<br/>• doctor exists and is active<br/>• doctor practises at that clinic<br/>• clinic matches THIS device's enrolment<br/>• consent flag present
-    B-->>A: signed grant · 60 s · single use
-    A->>A: verify against the pinned backend public key
-    A->>A: record
-```
+**Figure 5.** Grant minting moves to the AIMS LAB backend. The partner page sends five plain unsigned fields; the backend validates them against its own register and returns a short-lived single-use grant. The partner holds no key and signs nothing.
 
 Compare the two honestly. Before, the agent trusted what a page claimed, because
 the page held the key that made the claim believable. Now the backend checks
@@ -1269,9 +1134,9 @@ eliminate it.
 
 ### 7.4 Integrity — `CHN`
 
-![Figure 3 — Chain of custody](figures/fig3_chain_of_custody.svg)
+![Figure 6 — Chain of custody](figures/fig3_chain_of_custody.svg)
 
-**Figure 3.** Chain of custody. Each session carries an Ed25519-signed hash chain
+**Figure 6.** Chain of custody. Each session carries an Ed25519-signed hash chain
 whose entries link by the previous entry's digest, so omission, reordering or
 edit is detectable. A sealed segment is encrypted on the PC, uploaded, then read
 back and re-hashed by the server before acceptance. The archived WAV is
@@ -1412,17 +1277,9 @@ warning and no way to know it happened.
 **The solution.** A new trigger does not end the current session until the
 current session's prescription has been built.
 
-```mermaid
-stateDiagram-v2
-    [*] --> Recording: trigger accepted
-    Recording --> Recording: stray trigger — REFUSED, 409 GATE_NOT_ARMED
-    Recording --> Armed: consultation_complete for THIS patient
-    Armed --> Handover: next trigger
-    Handover --> Recording: previous closed, next open, no gap
-    Recording --> Closed: doctor Stop with reason
-    Armed --> Closed: doctor Stop with reason
-    Closed --> [*]
-```
+![Figure 7 — The consultation gate](figures/fig7_consultation_gate.svg)
+
+**Figure 7.** The consultation gate. A session begins un-armed; a stray trigger is refused and the recording continues. Only the prescription-built flag arms the gate, after which the next trigger hands over with no gap in capture.
 
 | ID | Requirement | Pri | Ver | Owner |
 |---|---|---|---|---|
@@ -2266,6 +2123,7 @@ their entire integration is the WebSocket, which Postman is the wrong tool for.
 | Version | Date | Change |
 |---|---|---|
 | 1.0 | 25 August 2026 | First baseline for the CMED integration meeting |
+| 1.5 | 5 September 2026 | Prepared for submission. The six diagrams that were mermaid source are now drawn figures, so the document is complete in print; figures renumbered into order of appearance. |
 | 1.4 | 25 August 2026 | Corrected §7.5a: the agent already re-verifies every segment locally before upload, so local damage is caught before it leaves the PC and a server-side mismatch is almost never damaged audio. Added §7.5a.1 enumerating all five quarantine triggers and which of them involve the recording at all — only one does, and it never reaches the server. |
 | 1.3 | 25 August 2026 | Added §7.5a `SRS-REC-01`–`09` and tests `AT-42`–`AT-46`: local re-verification before giving up, bounded retry to a fresh object key, per-segment rather than per-session quarantine, an un-quarantine path, preservation of unverifiable audio outside the chain, and central visibility of stuck local audio. |
 | 1.2 | 25 August 2026 | Figures regenerated from a layout pass that fails the build on any label collision. Added Appendix C (API reference and testability, `SRS-API-01`–`04`) and `SRS-IF1-16/18`: CMED renders nothing; all doctor messaging is delivered by our overlay. |
