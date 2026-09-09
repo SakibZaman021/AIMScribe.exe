@@ -7,7 +7,7 @@
 | | |
 |---|---|
 | Document | AIMS-SRS-001 |
-| Version | 1.6 |
+| Version | 1.7 |
 | Date | 9 September 2026 |
 | Status | Baseline for integration. Items marked **OD-nn** are open and need a decision. |
 | Relationship to other documents | Complements `CMED_INTEGRATION_README.md` (narrative) with numbered, testable requirements. |
@@ -1118,9 +1118,9 @@ lost by cutting often.
 | `SRS-SPL-06` | The spool shall hold 40 GB by default — about 135 recording-hours, roughly three weeks of one room's work. | M | A | AIMS |
 | `SRS-SPL-07` | The agent shall warn at 50 % and alarm at 80 % of the spool cap, and shall refuse to start a session below 20 GB free. | M | T | AIMS |
 | `SRS-SPL-08` | Local audio shall be deleted **only** on a valid purge receipt, after a 24 h grace period. | M | T | AIMS |
-| `SRS-SPL-09` | A QUARANTINED segment shall never be deleted automatically. | M | T | AIMS |
-| `SRS-SPL-13` | Quarantined material shall be subject to its own ceiling, separate from the working spool. Above that ceiling the agent shall raise a distinct operational alert naming the machine, the clinic and the bytes held. | M | T | AIMS |
-| `SRS-SPL-14` | Quarantined material shall be recoverable by an operator action that either releases it for re-upload (§7.5a) or exports and clears it. It shall not be capable of silently consuming the spool until the room can no longer record. | M | D | AIMS |
+| `SRS-SPL-09` | A QUARANTINED segment shall be delivered to the server before deletion, exactly as a verified one is. It shall not be deleted while undelivered, and shall not be retained once delivered. | M | T | AIMS |
+| `SRS-SPL-13` | No segment shall remain on the workstation beyond the drainage interval once connectivity permits delivery. The age of the oldest undelivered segment shall be reported in the heartbeat. | M | T | AIMS |
+| `SRS-SPL-14` | The spool shall reach zero whenever the backend has been reachable and idle for one drainage cycle. A non-empty spool on a connected machine is a defect and shall alert. | M | T | AIMS |
 
 **Why the thresholds in `SRS-SPL-07` exist at all.** The spool does not fill
 because audio accumulates in normal operation — in normal operation it drains
@@ -1132,10 +1132,10 @@ archive worker has stopped issuing receipts, or the session is quarantined. The
 20 GB floor are the graduated warnings that the buffer is filling. They are not a
 sign of a design fault; they are the instrument that reports one.
 
-`SRS-SPL-13` and `SRS-SPL-14` close the one case where that reasoning fails.
-Quarantined material is never deleted and, before §7.5a, was never retried, so it
-occupies spool capacity permanently. Accumulated over months, a machine could
-reach its floor and refuse to record with no operator ever having been told why.
+`SRS-SPL-13` and `SRS-SPL-14` state the consequence of §7.5a.2: because every
+segment is delivered whatever its verification outcome, a connected machine has
+no reason to hold anything. A spool that is not empty on a machine that has been
+online is therefore not a capacity question but a fault, and is reported as one.
 
 **The volatile-memory exposure, stated honestly.** Between the capture buffer and
 the pre-seal queue, approximately **99 seconds** of audio exists only in RAM — a
@@ -1250,20 +1250,60 @@ paperwork around it. That is the case `SRS-REC-07` exists to serve.
 | `SRS-REC-01` | On a **server-side** rejection the agent shall re-run its existing local verification (`read_segment`) and, if it passes, treat the failure as recoverable rather than terminal. | M | T | AIMS |
 | `SRS-REC-02` | If the local hash matches, the segment shall be re-uploaded to a **fresh object key** and re-committed. The suspect object shall not be overwritten; it is evidence of the failure. | M | T | AIMS |
 | `SRS-REC-03` | Retries shall be bounded — at most three, with growing delay. A rejected segment shall not be retried on every drain tick. | M | T | AIMS |
-| `SRS-REC-04` | If the local hash does **not** match, the agent shall stop retrying, keep the file, and raise a distinct alert naming local media corruption as the cause. | M | T | AIMS |
+| `SRS-REC-04` | If the local hash does **not** match, the agent shall stop retrying verification, mark the segment unverifiable, and upload it under `SRS-REC-07` regardless. It shall not retain it. | M | T | AIMS |
 | `SRS-REC-05` | The backend shall quarantine the **segment**, and shall quarantine the session only once retries are exhausted. | M | T | AIMS |
-| `SRS-REC-06` | An administrator shall be able to clear a session's quarantine after a verified re-upload, so a recovered session can be archived. | M | T | AIMS |
-| `SRS-REC-07` | A segment that cannot be verified locally shall still be uploaded, to a separate `quarantine/` prefix, outside the chain and explicitly marked unverifiable. It shall not enter the evidence archive. | M | T | AIMS |
+| `SRS-REC-06` | Quarantine shall be resolved by an automatic server-side process. Clearing it shall not require an administrator, and shall never require an action on a clinical PC. | M | T | AIMS |
+| `SRS-REC-07` | A segment that cannot be verified shall still be uploaded, to a separate `quarantine/` prefix, outside the chain and explicitly marked unverifiable. It shall not enter the evidence archive, and it shall not remain on the workstation. | M | T | AIMS |
 | `SRS-REC-08` | The agent shall report, in every heartbeat, the count and total bytes of segments held locally in a stuck state, so a PC hoarding unrecoverable audio is visible centrally rather than only in its own log file. | M | T | AIMS |
 | `SRS-REC-09` | An operator view shall list sessions stuck in quarantine across the fleet, with clinic, room, age and size. | M | D | AIMS |
 
 **On `SRS-REC-07` — the distinction that matters.** *Evidence* and *data* are not
 the same goal. The hash chain protects evidence; a consultation whose chain broke
-still contains clinical speech that is worth keeping for research. The present
-design conflates them, so a failed verification means nothing reaches the server.
-Separating them lets both hold: the verified archive stays strictly verified, and
-the unverifiable recording is preserved with its defect recorded against it,
-rather than left on a laptop in Dholpur until the disk fills.
+still contains clinical speech that is worth keeping, and is required downstream:
+a prescription cannot be generated from a recording that never arrived.
+Separating the two goals lets both hold. The verified archive stays strictly
+verified; the unverifiable recording arrives anyway, with its defect recorded
+against it.
+
+#### 7.5a.2 Nothing remains on the workstation
+
+The consulting-room PC is a transient buffer and nothing else. It is not a place
+where material waits for a decision, because there is nobody there to make one —
+the clinician is seeing patients, and every design decision in this specification
+has been aimed at removing them from the loop. A file awaiting adjudication on a
+laptop in Ershadnagar is a file nobody will ever adjudicate.
+
+> **`SRS-REC-10`** [M, T, AIMS] Every sealed segment shall reach the server,
+> without exception and without human involvement. Verification determines
+> *where* it lands — the evidence archive or the quarantine area — never
+> *whether* it is sent.
+>
+> **`SRS-REC-11`** [M, T, AIMS] A drainage scheduler shall run independently of
+> the live upload path, sweeping the spool on a fixed interval for anything not
+> yet delivered — pending, failed, quarantined or orphaned by a crash — and
+> shall deliver it. It shall not skip a segment because an earlier one failed.
+>
+> **`SRS-REC-12`** [M, T, AIMS] Local material shall be deleted once the server
+> acknowledges receipt, whether that receipt is a purge receipt for verified
+> audio or an acknowledgement of quarantine intake. Deletion follows custody
+> transfer, not verification outcome.
+>
+> **`SRS-REC-13`** [M, I, AIMS] No routine or exceptional path shall require a
+> person to open, copy, inspect or delete a file on a clinical PC. There is no
+> supported manual intervention on a workstation.
+>
+> **`SRS-REC-14`** [M, T, AIMS] Adjudication of quarantined material shall be a
+> server-side process that runs to a conclusion on its own — re-verify against
+> the chain, admit to the archive if it reconciles, or file permanently as
+> unverifiable — with a human notified of the outcome rather than blocking it.
+
+**This supersedes the earlier design.** `SRS-SPL-09` and the first version of
+this section held quarantined audio on the workstation indefinitely, pending a
+human decision. That was wrong on two counts. It leaves clinical audio on a
+laptop that AIMS LAB does not physically control, which is the opposite of the
+custody argument the rest of this document makes. And it withholds from the
+downstream pipeline exactly the recordings most likely to need attention, which
+becomes untenable once prescriptions are generated from that audio.
 
 ### 7.6 Session lifecycle and handover — `SES`
 
@@ -1586,16 +1626,27 @@ becomes visible rather than accumulating.
 
 ### 8.7 Database architecture — `DBA`
 
-Two databases, separated by sensitivity rather than by convenience.
+**One database. Two schemas.** Separation of access is required; separation of
+databases is not the way to get it, and costs the same things it cost in §8.7.2 —
+two connections, two migration paths, and a dashboard that cannot join across the
+line it needs to report on.
 
-| Database | Holds | Retention | Who may read it |
-|---|---|---|---|
-| **Audio catalogue** | Sessions, segments, chain entries, devices, alerts | With the archive | Operations, research engineering |
-| **Clinical record** | Demographics, prescriptions, diagnoses, notes, patient names | Per clinical policy | A separate, narrower role |
+| Schema | Holds | Who may read it |
+|---|---|---|
+| `audio` | Sessions, segments, chain entries, devices, alerts | Operations, research engineering |
+| `clinical` | Demographics, prescriptions, diagnoses, notes, patient names | A separate, narrower role |
 
-This split is worth its cost: it lets an engineer search recordings, diagnose a
-broken chain and run the dashboard without ever holding a patient name. A single
-database would make that impossible to enforce.
+> **`SRS-DBA-20`** [M, I, AIMS] Both domains shall live in one database, in two
+> schemas, with privileges granted per schema. A role holding `USAGE` on `audio`
+> and none on `clinical` can search every recording and run the dashboard
+> without being able to read a patient name.
+>
+> **`SRS-DBA-21`** [M, T, AIMS] Cross-schema joins shall be available to roles
+> holding both, so that reconciliation and reporting are single queries.
+
+This gives the isolation the two-database design was reaching for, enforced by
+the database rather than by which connection string an application happened to
+open, and it keeps one migration path.
 
 #### 8.7.1 The audio catalogue
 
@@ -1607,15 +1658,44 @@ manual retrieval ask for.
 > `doctors`, `devices`, `sessions`, `segments`, `chain_entries` and
 > `integrity_alerts`, with foreign keys enforced rather than implied.
 >
-> **`SRS-DBA-02`** [M, T, AIMS] A composite index on
-> `(hospital_id, doctor_id, session_date, patient_id)` shall support the
-> hierarchy directly, so that locating a recording is an index scan rather than
-> a filesystem search.
+> **`SRS-DBA-02`** [M, T, AIMS] The hierarchy shall be served by a composite
+> index on `(hospital_id, doctor_id, session_date)`, extended to include
+> `patient_id`.
 >
 > **`SRS-DBA-03`** [M, T, AIMS] Every session row shall carry its archive
-> filename and relative path, so a recording is locatable by query alone. The
-> current difficulty of finding a file by name is a missing index, not a missing
-> convention.
+> filename and relative path, so a recording is locatable by query alone.
+
+**Why sixty recordings feel slow, which is not what it looks like.** The indexes
+implied above already exist — `idx_sessions_archive_lookup` on
+`(hospital_id, doctor_id, session_date)`, `idx_sessions_patient_date`, and a
+unique index on `archive_relpath`. Sixty rows would be fast without any of them.
+The cost is therefore not in the query, and three other causes are:
+
+| Cause | Why it presents as a slow search | Fix |
+|---|---|---|
+| **Two disconnected catalogues** | Session metadata lives in Postgres; the archived files are indexed in a separate SQLite catalogue on the archive server. Neither alone answers "where is this recording", so the search becomes a manual walk of `hospital/doctor/date/` directories | `SRS-DBA-22` |
+| **No query interface** | There is no dashboard over either catalogue, so "search" means opening a folder or writing SQL by hand | §8.8 |
+| **Database autosuspend** | A database that scales to zero spends several seconds waking before answering anything. Against sixty rows, that wait *is* the entire perceived query time | `SRS-DBA-23` |
+
+> **`SRS-DBA-22`** [M, T, AIMS] There shall be one authoritative catalogue. The
+> archive worker shall write the archived filename, relative path, byte count and
+> digest back into it on completion, so that a single query answers where a
+> recording is and whether it is verified. A second catalogue on the archive
+> server may exist as a local convenience but shall not be authoritative.
+>
+> **`SRS-DBA-23`** [M, I, AIMS] Autosuspend shall be disabled on the operational
+> database. A cold start on a clinical path is not an acceptable latency, and it
+> is indistinguishable to a user from a slow query.
+>
+> **`SRS-DBA-24`** [S, T, AIMS] Substring search on a filename shall be supported
+> by a trigram index (`pg_trgm`), because a B-tree cannot serve a leading
+> wildcard. Without it, filename search degrades to a sequential scan as the
+> corpus grows — invisible at sixty rows, disabling at sixty thousand.
+>
+> **`SRS-DBA-25`** [M, T, AIMS] The filename components — patient, doctor,
+> hospital, start, end, date — shall each be stored as their own column and not
+> parsed out of the filename at query time. The filename is a label for humans;
+> the columns are what queries use.
 >
 > **`SRS-DBA-04`** [M, T, AIMS] The catalogue shall record, per session, the
 > close reason, whether the chain verified, whether it was quarantined and with
@@ -2405,6 +2485,7 @@ their entire integration is the WebSocket, which Postman is the wrong tool for.
 | Version | Date | Change |
 |---|---|---|
 | 1.0 | 25 August 2026 | First baseline for the CMED integration meeting |
+| 1.7 | 9 September 2026 | Quarantined material is delivered like any other, on a drainage scheduler; nothing remains on a workstation and no path requires a person to touch a clinical PC (`SRS-REC-10`–`14`, `SRS-SPL-09/13/14`). One database with two schemas replaces the two-database split. The search problem re-diagnosed: the indexes already existed, so `SRS-DBA-22`–`25` address the split catalogue, autosuspend and substring search instead. |
 | 1.6 | 9 September 2026 | Clinical record ingestion (§8.6), database architecture (§8.7) and the operational dashboard (§8.8) added; §8.1 reversed and the reversal recorded, with `SRS-DAT-15/16` on consent and access. `SRS-SPL-13/14` close the one case where quarantined material could consume the spool unreported. |
 | 1.5 | 5 September 2026 | Prepared for submission. The six diagrams that were mermaid source are now drawn figures, so the document is complete in print; figures renumbered into order of appearance. |
 | 1.4 | 25 August 2026 | Corrected §7.5a: the agent already re-verifies every segment locally before upload, so local damage is caught before it leaves the PC and a server-side mismatch is almost never damaged audio. Added §7.5a.1 enumerating all five quarantine triggers and which of them involve the recording at all — only one does, and it never reaches the server. |
