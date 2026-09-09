@@ -7,8 +7,8 @@
 | | |
 |---|---|
 | Document | AIMS-SRS-001 |
-| Version | 1.5 |
-| Date | 5 September 2026 |
+| Version | 1.6 |
+| Date | 9 September 2026 |
 | Status | Baseline for integration. Items marked **OD-nn** are open and need a decision. |
 | Relationship to other documents | Complements `CMED_INTEGRATION_README.md` (narrative) with numbered, testable requirements. |
 | Agent version | 2.3.1 |
@@ -1119,6 +1119,23 @@ lost by cutting often.
 | `SRS-SPL-07` | The agent shall warn at 50 % and alarm at 80 % of the spool cap, and shall refuse to start a session below 20 GB free. | M | T | AIMS |
 | `SRS-SPL-08` | Local audio shall be deleted **only** on a valid purge receipt, after a 24 h grace period. | M | T | AIMS |
 | `SRS-SPL-09` | A QUARANTINED segment shall never be deleted automatically. | M | T | AIMS |
+| `SRS-SPL-13` | Quarantined material shall be subject to its own ceiling, separate from the working spool. Above that ceiling the agent shall raise a distinct operational alert naming the machine, the clinic and the bytes held. | M | T | AIMS |
+| `SRS-SPL-14` | Quarantined material shall be recoverable by an operator action that either releases it for re-upload (§7.5a) or exports and clears it. It shall not be capable of silently consuming the spool until the room can no longer record. | M | D | AIMS |
+
+**Why the thresholds in `SRS-SPL-07` exist at all.** The spool does not fill
+because audio accumulates in normal operation — in normal operation it drains
+continuously and each segment is deleted within a day. It fills only when
+deletion is *blocked*, and deletion is blocked whenever a purge receipt cannot be
+obtained: the clinic's connectivity is down, the backend is unreachable, the
+archive worker has stopped issuing receipts, or the session is quarantined. The
+40 GB is a buffer sized for three weeks of that condition, and 50 %, 80 % and the
+20 GB floor are the graduated warnings that the buffer is filling. They are not a
+sign of a design fault; they are the instrument that reports one.
+
+`SRS-SPL-13` and `SRS-SPL-14` close the one case where that reasoning fails.
+Quarantined material is never deleted and, before §7.5a, was never retried, so it
+occupies spool capacity permanently. Accumulated over months, a machine could
+reach its floor and refuse to record with no operator ever having been told why.
 
 **The volatile-memory exposure, stated honestly.** Between the capture buffer and
 the pre-seal queue, approximately **99 seconds** of audio exists only in RAM — a
@@ -1381,9 +1398,11 @@ archive tree.
 | `clinic_id` | Identifier | Yes, after mapping |
 | `start_time`, `date` | Timestamp | Yes |
 | `consent_obtained`, `consent_method` | Consent record | Yes |
-| `patient_name` | Personal data | **No** — display only, discarded |
-| Prescription contents | Clinical | **Never sent** |
-| Diagnoses, notes, history | Clinical | **Never sent** |
+| `patient_name` | Personal data | Yes — from the clinical record (§8.6) |
+| Demographics | Personal data | Yes — at trigger |
+| Prescription contents | Clinical | Yes — at conclusion |
+| Diagnoses, notes, history | Clinical | Yes — at conclusion |
+| Previous prescription | Clinical | Yes — at trigger, for a returning patient |
 
 **AIMScribe → CMED**
 
@@ -1399,12 +1418,37 @@ archive tree.
 > **`SRS-DAT-01`** [M, I, AIMS] Audio shall never be transmitted to CMED, in any
 > form, through any interface described in this document.
 >
-> **`SRS-DAT-02`** [M, T, AIMS] `patient_name` shall be held in memory for
-> display and shall never be written to the chain, filename, archive path or
-> database.
+> **`SRS-DAT-02`** [M, T, AIMS] `patient_name` shall never appear in a chain
+> entry, a filename, an archive path, an object key or a log line. It is stored
+> only as a column of the clinical record (§8.7), where access is separately
+> controlled.
 >
-> **`SRS-DAT-03`** [M, I, Joint] No clinical content — prescriptions, diagnoses,
-> notes, investigation results — shall cross the boundary in either direction.
+> **`SRS-DAT-03`** [M, I, Joint] Clinical content crosses the boundary in one
+> direction only: CMED to AIMS LAB. Nothing clinical is ever returned.
+
+**This is a reversal, and it must be recorded as one.** Versions 1.0 to 1.5 of
+this specification stated that prescriptions, diagnoses, notes and patient names
+would never cross the boundary, and the design derived several properties from
+that promise — most visibly the rule that identifiers are "boring" because they
+become directory names carrying nothing sensitive. Ingesting the clinical record
+(§8.6) changes the classification of the whole archive volume, not merely of the
+new files. Three consequences follow and are specified rather than assumed:
+
+| Was true while only audio was held | Is true once the clinical record is held |
+|---|---|
+| An archive directory name disclosed nothing | The directory now sits beside a file naming the patient |
+| Consent covered audio recording | Consent must cover extraction of the clinical record |
+| Loss of the volume exposed unlabelled audio | Loss of the volume exposes an identified clinical record |
+
+> **`SRS-DAT-15`** [M, I, Joint] The consent text presented to patients shall be
+> revised before any clinical record is ingested, and the revision shall be
+> recorded with a date. Consent obtained for audio recording alone does not
+> extend to extraction of the record.
+>
+> **`SRS-DAT-16`** [M, I, AIMS] The archive volume and the clinical database
+> shall be encrypted at rest, and access to the clinical database shall be
+> granted separately from access to the audio catalogue. A role able to search
+> recordings shall not thereby be able to read prescriptions.
 
 ### 8.2 Identifier rules
 
@@ -1477,6 +1521,231 @@ reconciled by keeping two renditions.
 > artefacts that increase hallucination in transformer-based recognisers.
 > Measured room noise concentrates at 100–300 Hz, so a high-pass at 80 Hz and
 > long-window level normalisation carry most of the benefit.
+
+### 8.6 Clinical record ingestion — `CRI`
+
+The record is required at two distinct moments, and the interface already has a
+signal at each of them. Nothing new is added to the transport.
+
+| Moment | Existing signal | What CMED sends | Why then |
+|---|---|---|---|
+| Consultation begins | `start` (the trigger) | Demographics captured at reception; for a returning patient, the most recent previous prescription in full | The clinician needs the history at the start; a record delivered afterwards cannot inform the encounter it describes |
+| Consultation concludes | `consultation_complete` | Prescription contents, diagnoses, notes, investigations | These do not exist until the prescription is built — which is the event that already arms the gate |
+
+> **`SRS-CRI-01`** [M, T, CMED] The trigger shall carry a `demographics` object
+> holding the data captured before the patient entered the consulting room.
+>
+> **`SRS-CRI-02`** [M, T, CMED] For a patient with a prior encounter, the trigger
+> shall additionally carry `previous_prescription`: the complete contents of the
+> most recent one, with its date.
+>
+> **`SRS-CRI-03`** [M, T, CMED] `consultation_complete` shall carry the
+> prescription contents, diagnoses, clinical notes and investigation orders for
+> the encounter just concluded.
+>
+> **`SRS-CRI-04`** [M, T, AIMS] Ingestion shall never block acquisition. A record
+> that is absent, late, malformed or rejected shall be logged and reconciled
+> afterwards; the recording proceeds regardless.
+>
+> **`SRS-CRI-05`** [M, T, AIMS] Each record shall be written to the archive
+> beside its audio, in the same directory, under the same stem with a `.json`
+> extension — `PID_DID_HOSID_START_END_DATE.json`.
+>
+> **`SRS-CRI-06`** [M, T, AIMS] The record shall also be ingested into the
+> clinical database (§8.7) field by field. The file is the artefact; the database
+> is the index. Neither is derived from the other at query time.
+>
+> **`SRS-CRI-07`** [M, T, AIMS] A record shall be validated against a published
+> schema on arrival. A record failing validation shall be stored unmodified in a
+> quarantine area and reported, never silently discarded and never partially
+> ingested.
+>
+> **`SRS-CRI-08`** [M, I, AIMS] `patient_name` shall be taken from the record and
+> stored only in the clinical database. It shall not enter the filename, the
+> directory path, the chain or the audio catalogue.
+>
+> **`SRS-CRI-09`** [M, T, AIMS] Ingestion shall be idempotent. A record delivered
+> twice shall produce one row, not two.
+>
+> **`SRS-CRI-10`** [M, T, AIMS] The record and its audio shall be reconciled
+> nightly. A recording with no record, and a record with no recording, shall both
+> be reported — the two are different faults with different causes.
+>
+> **`SRS-CRI-11`** [S, I, Joint] The set of fields required at each moment shall
+> be agreed in writing and versioned. A field added later shall not invalidate
+> records already stored under an earlier version.
+>
+> **`SRS-CRI-12`** [M, I, AIMS] Records shall be encrypted at rest and shall not
+> be transmitted to any downstream service that does not require them.
+
+**Reconciliation is the requirement to take seriously.** Audio arrives over a
+store-and-forward path that tolerates three weeks of disconnection; the record
+arrives over a live browser channel that tolerates none. The two will therefore
+diverge routinely, and a nightly reconciliation is the only way that divergence
+becomes visible rather than accumulating.
+
+### 8.7 Database architecture — `DBA`
+
+Two databases, separated by sensitivity rather than by convenience.
+
+| Database | Holds | Retention | Who may read it |
+|---|---|---|---|
+| **Audio catalogue** | Sessions, segments, chain entries, devices, alerts | With the archive | Operations, research engineering |
+| **Clinical record** | Demographics, prescriptions, diagnoses, notes, patient names | Per clinical policy | A separate, narrower role |
+
+This split is worth its cost: it lets an engineer search recordings, diagnose a
+broken chain and run the dashboard without ever holding a patient name. A single
+database would make that impossible to enforce.
+
+#### 8.7.1 The audio catalogue
+
+The reporting hierarchy is clinic → clinician → date → patient, and the schema
+is indexed for exactly that traversal, because it is what both the dashboard and
+manual retrieval ask for.
+
+> **`SRS-DBA-01`** [M, I, AIMS] The catalogue shall model `hospitals`,
+> `doctors`, `devices`, `sessions`, `segments`, `chain_entries` and
+> `integrity_alerts`, with foreign keys enforced rather than implied.
+>
+> **`SRS-DBA-02`** [M, T, AIMS] A composite index on
+> `(hospital_id, doctor_id, session_date, patient_id)` shall support the
+> hierarchy directly, so that locating a recording is an index scan rather than
+> a filesystem search.
+>
+> **`SRS-DBA-03`** [M, T, AIMS] Every session row shall carry its archive
+> filename and relative path, so a recording is locatable by query alone. The
+> current difficulty of finding a file by name is a missing index, not a missing
+> convention.
+>
+> **`SRS-DBA-04`** [M, T, AIMS] The catalogue shall record, per session, the
+> close reason, whether the chain verified, whether it was quarantined and with
+> what reason, and whether it was terminated by the clinician.
+
+#### 8.7.2 The clinical record
+
+**On separating male and female patients into different databases — a
+recommendation against, with the alternative.** The requirement driving it is
+real: the required fields differ by sex. But separate databases would break the
+dashboard requested in §8.8 of this same specification. "How many patients were
+seen at Dholpur today" would become two queries against two databases, unioned
+in application code, and any future report that forgets one side would
+under-count silently rather than fail. Migrations would have to be applied twice
+and would drift. A patient whose recorded sex is corrected would have to be moved
+between databases, losing the primary key guarantee and every foreign key
+pointing at it.
+
+Differing fields are a schema question, not a database question, and Postgres
+answers it directly:
+
+> **`SRS-DBA-05`** [M, I, AIMS] Patients shall be held in one table in one
+> database. Sex-specific data shall be held in dedicated satellite tables joined
+> on `patient_id` — for example an obstetric history table populated only for
+> the patients it applies to.
+>
+> **`SRS-DBA-06`** [M, T, AIMS] Sex-conditional mandatory fields shall be
+> enforced by table-level `CHECK` constraints, so that a record missing a field
+> its sex requires is rejected by the database rather than by convention.
+
+This gives per-sex validation, single-query reporting, one migration path, and a
+correction that is an `UPDATE` rather than a migration. If separate databases are
+nonetheless preferred, the schema below transfers unchanged and §8.8 acquires a
+union in every query; that trade should be made deliberately.
+
+**On current and previous prescriptions as two tables** — the same reasoning
+applies more sharply. Two tables keyed on `patient_id` can hold exactly one
+previous prescription, so the third visit silently destroys the first. That is
+data loss by schema.
+
+> **`SRS-DBA-07`** [M, I, AIMS] Prescriptions shall be stored in one table keyed
+> on `(patient_id, encounter_id)`, retaining every encounter.
+>
+> **`SRS-DBA-08`** [M, T, AIMS] `current_prescription` and
+> `previous_prescription` shall be provided as **views** over that table,
+> resolved by encounter date. The two-table interface is preserved exactly;
+> the history behind it is not discarded.
+>
+> **`SRS-DBA-09`** [M, T, AIMS] `previous_prescription` served at trigger time
+> shall be the most recent encounter **strictly before** the current one, so that
+> a same-day repeat visit cannot return the encounter in progress.
+
+**Structure.** Prescriptions shall be stored field by field, not as an opaque
+blob:
+
+> **`SRS-DBA-10`** [M, I, AIMS] Prescription contents shall be normalised into
+> typed columns and a `prescription_items` child table — one row per prescribed
+> item, with drug, dose, frequency and duration as separate columns. Free text
+> shall remain free text; structured data shall not.
+>
+> **`SRS-DBA-11`** [S, I, AIMS] The original JSON shall be retained alongside the
+> normalised form in a `JSONB` column, so that a field not yet modelled is not
+> lost and can be extracted later without re-ingestion.
+
+#### 8.7.3 What makes it industry grade
+
+> **`SRS-DBA-12`** [M, I, AIMS] Schema changes shall be applied only by versioned,
+> forward-only migrations held in version control and applied by CI. No schema
+> change shall be made through a web console.
+>
+> **`SRS-DBA-13`** [M, T, AIMS] Constraints shall be expressed in the database —
+> foreign keys, `NOT NULL`, `CHECK`, uniqueness — and not solely in application
+> code.
+>
+> **`SRS-DBA-14`** [M, T, AIMS] Every table carrying clinical or identifying data
+> shall have `created_at` and `updated_at`, maintained by trigger.
+>
+> **`SRS-DBA-15`** [M, T, AIMS] Access to the clinical database shall be by role,
+> with read, write and administrative roles distinct, and no application
+> connecting as the owner.
+>
+> **`SRS-DBA-16`** [M, D, AIMS] Point-in-time recovery shall be enabled, and a
+> nightly encrypted logical dump shall be written to a different provider.
+> Point-in-time recovery protects against an operator's mistake; it does not
+> protect against losing the account.
+>
+> **`SRS-DBA-17`** [M, D, AIMS] Restoration shall be tested on a schedule, and
+> the test recorded. An untested backup is a belief, not a control.
+>
+> **`SRS-DBA-18`** [M, T, AIMS] Reads and writes of clinical data shall be
+> written to an append-only audit log recording who, what and when.
+>
+> **`SRS-DBA-19`** [S, I, AIMS] Connection pooling shall be in transaction mode,
+> and the driver configured accordingly — server-side prepared statements are
+> unavailable in that mode and fail obscurely if assumed.
+
+### 8.8 Operational dashboard — `DSH`
+
+> **`SRS-DSH-01`** [M, D, AIMS] The dashboard shall report daily volume by
+> clinic and by clinician, as counts of recordings and total recorded hours,
+> shown both as a chart and as a table.
+>
+> **`SRS-DSH-02`** [M, D, AIMS] It shall support the hierarchy of §8.7.1 —
+> clinic, then clinician, then date, then patient — and allow retrieval of a
+> recording by any of them.
+>
+> **`SRS-DSH-03`** [M, D, AIMS] It shall report integrity outcomes: recordings
+> whose chain failed verification, recordings quarantined and under which of the
+> five triggers, and recordings terminated by the clinician before the encounter
+> concluded.
+>
+> **`SRS-DSH-04`** [M, D, AIMS] It shall report acquisition health per room:
+> stuck local bytes (`SRS-REC-08`), speech-level outcomes (`SRS-LVL-02`), and
+> agents not seen within three heartbeat intervals.
+>
+> **`SRS-DSH-05`** [M, D, AIMS] It shall report reconciliation state: recordings
+> without a clinical record, and records without a recording (`SRS-CRI-10`).
+>
+> **`SRS-DSH-06`** [M, I, AIMS] The dashboard shall read the audio catalogue
+> only. It shall not display patient names or clinical content, so that
+> operational monitoring does not require clinical access.
+>
+> **`SRS-DSH-07`** [S, D, AIMS] Counts shall be derivable to their underlying
+> rows. A figure a reader cannot drill into is a figure they cannot act on.
+
+`SRS-DSH-03` is the one that changes behaviour rather than reporting it. A
+quarantined session or a forced termination is presently visible only to whoever
+reads an alert table or a log file on the machine itself; surfacing both against
+clinic and clinician makes a recurring problem in one room visible as a pattern
+rather than as a series of unrelated incidents.
 
 ---
 
@@ -1754,6 +2023,16 @@ Each test is pass/fail on a running system, with the requirements it verifies.
 | `AT-44` | Exhaust the retry budget on one segment | REC-03, REC-05 | Exactly three attempts; session quarantines only after the third |
 | `AT-45` | Clear a quarantine after a verified re-upload | REC-06 | Session archives normally |
 | `AT-46` | Leave a session quarantined and read the heartbeat | REC-08, REC-09 | Stuck bytes reported centrally and visible in the operator view |
+| `AT-47` | Send a trigger with demographics and a previous prescription | CRI-01, CRI-02 | Both stored; recording unaffected |
+| `AT-48` | Withhold the clinical record entirely for one encounter | CRI-04, CRI-10 | Recording completes; reconciliation reports the gap next night |
+| `AT-49` | Deliver a record failing schema validation | CRI-07 | Stored unmodified in quarantine and reported; nothing partially ingested |
+| `AT-50` | Deliver the same record twice | CRI-09 | One row, not two |
+| `AT-51` | Grep the archive paths, filenames and chain for the patient's name | CRI-08, DAT-02 | Not present in any of them |
+| `AT-52` | Record a third encounter for one patient | DBA-07, DBA-08 | All three retained; the views return the correct current and previous |
+| `AT-53` | Two encounters for one patient on the same day | DBA-09 | `previous_prescription` returns the earlier one, never the encounter in progress |
+| `AT-54` | Insert a female-only field for a male patient, and omit a required one | DBA-06 | Rejected by a database constraint, not by application code |
+| `AT-55` | Query recordings for one clinic, clinician and date | DBA-02, DSH-02 | Served by index; recording located without a filesystem search |
+| `AT-56` | Open the dashboard as an operations role | DSH-06 | Volumes, integrity and reconciliation visible; no patient name or clinical content reachable |
 | `AT-30` | Deploy the backend during an active recording | NFR-03 | No interruption; no lost segment |
 | `AT-31` | Send a 128 KB frame | IF1 transport | Refused, connection preserved |
 | `AT-32` | Send a message with an unknown extra field | NFM-05 | Ignored; command succeeds |
@@ -2115,7 +2394,10 @@ their entire integration is the WebSocket, which Postman is the wrong tool for.
 | `REC` | Recovering unverified audio | 7.5a |
 | `SES` / `GAT` / `UIX` | Sessions, gate, overlay | 7.6–7.8 |
 | `BKD` / `ARC` | Backend and archive worker | 7.9–7.10 |
-| `DAT` | Data | 8 |
+| `DAT` | Data | 8.1–8.5 |
+| `CRI` | Clinical record ingestion | 8.6 |
+| `DBA` | Database architecture | 8.7 |
+| `DSH` | Operational dashboard | 8.8 |
 | `NFP` / `NFC` / `NFR` / `NFS` / `NFO` / `NFM` / `NFU` | Non-functional | 9 |
 
 ### Appendix E — Document history
@@ -2123,6 +2405,7 @@ their entire integration is the WebSocket, which Postman is the wrong tool for.
 | Version | Date | Change |
 |---|---|---|
 | 1.0 | 25 August 2026 | First baseline for the CMED integration meeting |
+| 1.6 | 9 September 2026 | Clinical record ingestion (§8.6), database architecture (§8.7) and the operational dashboard (§8.8) added; §8.1 reversed and the reversal recorded, with `SRS-DAT-15/16` on consent and access. `SRS-SPL-13/14` close the one case where quarantined material could consume the spool unreported. |
 | 1.5 | 5 September 2026 | Prepared for submission. The six diagrams that were mermaid source are now drawn figures, so the document is complete in print; figures renumbered into order of appearance. |
 | 1.4 | 25 August 2026 | Corrected §7.5a: the agent already re-verifies every segment locally before upload, so local damage is caught before it leaves the PC and a server-side mismatch is almost never damaged audio. Added §7.5a.1 enumerating all five quarantine triggers and which of them involve the recording at all — only one does, and it never reaches the server. |
 | 1.3 | 25 August 2026 | Added §7.5a `SRS-REC-01`–`09` and tests `AT-42`–`AT-46`: local re-verification before giving up, bounded retry to a fresh object key, per-segment rather than per-session quarantine, an un-quarantine path, preservation of unverifiable audio outside the chain, and central visibility of stuck local audio. |
