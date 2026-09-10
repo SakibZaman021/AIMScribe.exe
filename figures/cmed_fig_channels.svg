@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 620" color="#1a1a1a" role="img" aria-label="The two channels between CMED and AIMScribe. Channel A runs from the CMED page in the doctor's browser to the recorder on the same machine and carries only the control signals. Channel B runs server to server from CMED to the AIMS LAB backend and carries the clinical data. Audio travels only from the recorder to the AIMS LAB backend and is never sent to CMED." font-family="Helvetica, Arial, sans-serif">
+<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker><marker id="arA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b3261e"/></marker></defs>
+<text x="24" y="26" font-size="12.5" font-weight="600" fill="currentColor">Two channels, two jobs</text>
+<text x="24" y="44" font-size="9.5" fill="currentColor">Control signals go to the PC. Clinical data goes server to server.</text>
+<rect x="24" y="68" width="300" height="300" rx="8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="5 4" opacity="0.55"/>
+<text x="24" y="62" font-size="10" font-weight="600" fill="currentColor">DOCTOR'S PC</text>
+<rect x="44" y="92" width="260" height="52" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="174.0" y="115.16000000000001" font-size="10.5" font-weight="600" text-anchor="middle" fill="currentColor">CMED page in the browser</text>
+<text x="174.0" y="128.67000000000002" font-size="8.5" text-anchor="middle" fill="currentColor">sends the control signals</text>
+<rect x="44" y="196" width="260" height="68" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="174.0" y="220.645" font-size="10.5" font-weight="600" text-anchor="middle" fill="currentColor">aimscribe.exe</text>
+<text x="174.0" y="234.15500000000003" font-size="8.5" text-anchor="middle" fill="currentColor">records · encrypts · uploads</text>
+<text x="174.0" y="247.18500000000003" font-size="8.5" text-anchor="middle" fill="currentColor">shows Stop / Pause to the doctor</text>
+<rect x="44" y="292" width="260" height="52" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="174.0" y="315.16" font-size="10.5" font-weight="600" text-anchor="middle" fill="currentColor">Microphone</text>
+<text x="174.0" y="328.67" font-size="8.5" text-anchor="middle" fill="currentColor">fixed placement in the room</text>
+<path d="M174,144 L174,190" fill="none" stroke="#b3261e" stroke-width="2.4" marker-end="url(#arA)"/>
+<path d="M174,292 L174,270" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<text x="184" y="172" font-size="9" font-weight="600" fill="#b3261e">Channel A</text>
+<rect x="392" y="68" width="264" height="120" rx="8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="5 4" opacity="0.55"/>
+<text x="392" y="62" font-size="10" font-weight="600" fill="currentColor">CMED SERVERS</text>
+<rect x="412" y="92" width="224" height="76" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="524.0" y="120.64500000000001" font-size="10.5" font-weight="600" text-anchor="middle" fill="currentColor">CMED backend</text>
+<text x="524.0" y="134.155" font-size="8.5" text-anchor="middle" fill="currentColor">sends patient information</text>
+<text x="524.0" y="147.185" font-size="8.5" text-anchor="middle" fill="currentColor">and prescription contents</text>
+<rect x="392" y="236" width="264" height="300" rx="8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="5 4" opacity="0.55"/>
+<text x="392" y="230" font-size="10" font-weight="600" fill="currentColor">AIMS LAB</text>
+<rect x="412" y="260" width="224" height="60" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="524.0" y="287.16" font-size="10.5" font-weight="600" text-anchor="middle" fill="currentColor">Backend API</text>
+<text x="524.0" y="300.67" font-size="8.5" text-anchor="middle" fill="currentColor">authorises · verifies · stores</text>
+<rect x="412" y="344" width="224" height="56" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="524.0" y="369.16" font-size="10.5" font-weight="600" text-anchor="middle" fill="currentColor">Recordings database</text>
+<text x="524.0" y="382.67" font-size="8.5" text-anchor="middle" fill="currentColor">sessions · devices · integrity</text>
+<rect x="412" y="420" width="224" height="56" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="524.0" y="445.16" font-size="10.5" font-weight="600" text-anchor="middle" fill="currentColor">Clinical database</text>
+<text x="524.0" y="458.67" font-size="8.5" text-anchor="middle" fill="currentColor">prescriptions · notes · history</text>
+<rect x="412" y="492" width="224" height="36" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="524.0" y="513.675" font-size="10.5" font-weight="600" text-anchor="middle" fill="currentColor">Audio archive</text>
+<path d="M524,320 L524,338" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<path d="M618,320 L618,414" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<path d="M430,320 L430,486" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<path d="M524,188 L524,254" fill="none" stroke="#b3261e" stroke-width="2.4" marker-end="url(#arA)"/>
+<text x="534" y="214" font-size="9" font-weight="600" fill="#b3261e">Channel B</text>
+<text x="534" y="227" font-size="8.5" fill="#b3261e">HTTPS + key</text>
+<path d="M304,290 L406,290" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<text x="340" y="282" font-size="8.5" fill="currentColor">audio</text>
+<text x="24" y="400" font-size="10" font-weight="600" fill="#b3261e">Channel A — to the PC</text>
+<text x="24" y="416" font-size="9" fill="currentColor">API 1 trigger, API 3 arm.</text>
+<text x="24" y="430" font-size="9" fill="currentColor">Small, instant, controls</text>
+<text x="24" y="444" font-size="9" fill="currentColor">the microphone.</text>
+<text x="24" y="476" font-size="10" font-weight="600" fill="#b3261e">Channel B — to AIMS LAB</text>
+<text x="24" y="492" font-size="9" fill="currentColor">API 2 patient information,</text>
+<text x="24" y="506" font-size="9" fill="currentColor">API 3 prescription contents.</text>
+<text x="24" y="520" font-size="9" fill="currentColor">Server to server, no browser.</text>
+<text x="24" y="570" font-size="10" font-weight="600" fill="currentColor">Audio only ever travels from the PC to AIMS LAB.</text>
+<text x="24" y="586" font-size="10" fill="currentColor">It is never sent to CMED, in any form, at any time.</text>
+</svg>

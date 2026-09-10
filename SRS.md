@@ -7,7 +7,7 @@
 | | |
 |---|---|
 | Document | AIMS-SRS-001 |
-| Version | 1.7 |
+| Version | 2.0 |
 | Date | 9 September 2026 |
 | Status | Baseline for integration. Items marked **OD-nn** are open and need a decision. |
 | Relationship to other documents | Complements `CMED_INTEGRATION_README.md` (narrative) with numbered, testable requirements. |
@@ -20,7 +20,7 @@
 ## Contents
 
 **Part I — Context**
-1. [Introduction](#1-introduction)
+1. [Introduction](#1-introduction) — including §1.7, how to read this
 2. [Overall description](#2-overall-description)
 3. [System architecture](#3-system-architecture)
 
@@ -54,18 +54,23 @@ This document states, in numbered and individually testable form, what the
 AIMScribe system must do from the moment a microphone opens in a consulting room
 to the moment a verified recording rests in the AIMS LAB archive.
 
-It exists so that CMED's engineers can build their side of the integration
-against a fixed, unambiguous contract, and so that both organisations can later
-point at a specific requirement and say *that one is met* or *that one is not*.
+It gives CMED's engineers a fixed contract to build against. It also lets either
+side point at a numbered requirement later and say whether it was met.
 
 ### 1.2 Scope
 
-**In scope.** Audio capture on the consulting-room PC; segmentation; local
-encrypted spooling; the cryptographic evidence chain; upload and server-side
-verification; session lifecycle including automatic patient-to-patient handover;
-the consultation gate; the recording-control overlay; device enrolment;
-recording authorisation; the CMED integration surface; the AIMS LAB backend; the
-archive worker; and the server capacity needed to run all of it.
+**In scope.** Everything from the microphone to the archive:
+
+- recording audio on the consulting-room PC, and cutting it into pieces
+- encrypting those pieces and sending them to the server
+- the fingerprint that proves nothing was altered
+- checking each piece on arrival
+- starting, pausing and closing a consultation
+- the automatic handover from one patient to the next
+- the gate, and the on-screen Stop and Pause control
+- registering a PC, and authorising each recording
+- the CMED interface, the AIMS LAB server and the archive
+- the hardware needed to run all of it
 
 **Out of scope.** The ASR (speech-to-text) and NER (clinical entity extraction)
 pipeline. Those run entirely inside AIMS LAB, strictly downstream of everything
@@ -151,6 +156,40 @@ optional.
 
 The **Owner** column names who builds it: *AIMS*, *CMED*, or *Joint* where both
 sides change at once.
+
+### 1.7 How to read this document
+
+This is a long document because it is the engineering record. **CMED does not
+need to read all of it.** A separate short guide — *AIMScribe Integration Guide
+for CMED* — covers everything CMED must build, in about eleven pages. This
+document is where the detail behind that guide lives.
+
+If you only want to know what CMED implements, read §6.1, §7.7 and Appendix C.1.
+Everything else describes obligations that fall on AIMS LAB.
+
+**Words used throughout, in plain terms.**
+
+| Term | What it means here |
+|---|---|
+| **Agent** | The small program on the doctor's PC that does the recording. Its file name is `aimscribe.exe`. |
+| **Backend** | The AIMS LAB server. It authorises recordings, checks them, and stores them. |
+| **Session** | One recorded consultation, from the moment the microphone opens to the moment it closes. |
+| **Segment** | A short piece of a recording, 30 to 60 seconds long. Recordings are sent in pieces so a failure loses a piece, not the whole thing. |
+| **Trigger** | The message CMED sends when a doctor opens a patient. It starts the recording. |
+| **Arm** | The message CMED sends when the prescription is built. It does not stop the recording; it allows the *next* patient to stop it. |
+| **Gate** | The rule that a new patient cannot end the current recording until that consultation's prescription has been built. |
+| **Loopback** | A connection from a program to another program on the same computer. It never touches the network. |
+| **Enrolment** | Registering one PC with AIMS LAB, once, before it is used. |
+| **Grant** | A one-minute, one-use permission to record a specific consultation. |
+| **Hash chain** | A running fingerprint of a recording. If any part is changed, removed or reordered, the fingerprint stops matching. |
+| **Purge receipt** | Proof from the server that a verified copy is stored. Only this allows the PC to delete its copy. |
+| **Quarantine** | What happens to a recording whose fingerprint does not match. It is kept and reviewed, never discarded. |
+| **Idempotent** | Doing the same thing twice has the same result as doing it once. |
+
+**How requirements are written.** Each one has an identifier such as
+`SRS-CAP-07`, a priority (**M** mandatory, **S** should, **C** could), how it
+will be checked (**T** test, **D** demonstration, **I** inspection, **A**
+analysis or measurement), and who builds it. "Shall" means binding.
 
 ---
 
@@ -360,6 +399,36 @@ authorised, but nothing is lost that was.
 opens on separate threads, so the gap between two patients is not a gap in
 recording. This is `CON-08` made real.
 
+### 3.3a Two channels between CMED and AIMS LAB
+
+CMED sends two different kinds of thing, and they travel by different routes for
+a practical reason. Control signals must be instant, because they open a
+microphone. Clinical data can be large, and has no business passing through a
+browser.
+
+| | Route | Carries | Why this route |
+|---|---|---|---|
+| **Channel A** | CMED page → agent, on the doctor's own PC (loopback) | The trigger, and the arm signal | It must be immediate. A round trip to a server before the microphone opened would lose the first seconds of the consultation. |
+| **Channel B** | CMED backend → AIMS LAB backend, over HTTPS | Patient information, previous prescription, prescription contents | Server to server. Size does not matter, and nothing sensitive travels through a browser. |
+
+> **`SRS-TOP-04`** [M, I, Joint] Control signals shall travel on Channel A and
+> clinical data on Channel B. Clinical data shall not be relayed through the
+> browser, and control signals shall not depend on a server round trip.
+>
+> **`SRS-TOP-05`** [M, I, AIMS] Channel B shall be authenticated by an API key
+> issued to CMED, and shall accept clinical data only. No control of a recording
+> shall be possible over Channel B.
+>
+> **`SRS-TOP-06`** [M, T, AIMS] Audio shall never travel on either channel
+> towards CMED.
+
+**A correction to earlier versions.** Versions up to 1.8 stated that no
+connection existed between a partner system and the AIMS LAB backend. Channel B
+is that connection. It was added because sending a full prescription through a
+browser to a local program, only to have that program forward it, is a worse
+design than a direct server call. Figure 1 and the trust-boundary description
+below are updated accordingly.
+
 ### 3.4 Trust boundaries
 
 ![Figure 3 — Trust boundaries](figures/fig4_trust_boundaries.svg)
@@ -470,15 +539,16 @@ If enrolment fails because the network is down, the token is deliberately left o
 disk and the agent retries at the next start. Burning it would strand a PC in
 another district with a credential that cannot be reissued remotely.
 
-**A token may be presented twice — but only in one narrow case.** If the server
-committed the enrolment and the agent then failed to write its identity file (a
-full disk, a permissions problem, a crash between two writes), the machine has no
-credential and its token is spent. It can never recover on its own, and the only
-symptom is a PC reporting *not enrolled* while the server shows it enrolled
-perfectly well. That happened in the field. So a used token may be redeemed again
-by the *same* machine, proven by the *same* device public key, and only while the
-device it created has never once been seen — after the first heartbeat, a second
-presentation is a replay and is refused.
+**A token may be used twice, in one narrow case.** Suppose the server records the
+enrolment, and the PC then fails to save its own copy — a full disk, a
+permissions problem, a crash between two writes. The PC now has no credential,
+and its token is spent. It cannot recover by itself. The only symptom is a PC
+saying *not enrolled* while the server shows it enrolled perfectly well. This
+happened in the field.
+
+So a spent token may be redeemed once more, but only by the same machine, proven
+by the same device key, and only while that device has never been seen. After the
+first heartbeat, a second attempt is a replay and is refused.
 
 > **`SRS-ENR-07`** [M, T, AIMS] A failed enrolment caused by an unreachable
 > backend shall leave the token on disk for retry.
@@ -555,11 +625,10 @@ doctor arrives from CMED with each trigger. This is `SRS-INV-03` in practice.
 **Nothing.** This is worth stating as a requirement rather than a reassurance,
 because the question will be asked again by CMED's security reviewer:
 
-> **`SRS-ENR-18`** [M, I, Joint] Device enrolment shall require no participation
-> from CMED. No CMED endpoint shall be called during enrolment; no CMED
-> credential shall be presented; no enrolment state shall be stored in a CMED
-> system; and no change to CMED software shall be required to enrol, re-enrol or
-> revoke a device.
+> **`SRS-ENR-18`** [M, I, Joint] Enrolment shall require nothing from CMED. No
+> CMED endpoint is called, no CMED credential is used, and no enrolment data is
+> held in a CMED system. Enrolling, re-enrolling or revoking a PC shall need no
+> change to CMED software.
 
 The reasoning, in full, because it is the part that generalises:
 
@@ -926,10 +995,10 @@ seconds later.
 | `gate_armed` | Flag accepted | Optional |
 | `warning` | Disk low, microphone lost, backend unreachable | Optionally surface to the doctor |
 
-> **`SRS-IF1-16`** [M, I, AIMS] **CMED shall not be required to render anything.**
-> Every message intended for the doctor — recording state, gate state, level
-> prompts, disk and microphone warnings, errors — shall be delivered by the
-> AIMScribe overlay (§7.8), which AIMS LAB builds and controls.
+> **`SRS-IF1-16`** [M, I, AIMS] **CMED shall not be required to display
+> anything.** Every message meant for the doctor shall come from the AIMScribe
+> on-screen control (§7.8), which AIMS LAB builds. That covers recording state,
+> gate state, level prompts, disk and microphone warnings, and errors.
 >
 > **`SRS-IF1-18`** [C, D, CMED] CMED *may* additionally show its own indicator
 > from the pushed events, but nothing in this specification depends on it and
@@ -1061,9 +1130,10 @@ than chosen a priori:
 dBFS, which is correct, and at least one archived session clipped at 0.0 dBFS.
 Raising input gain moves the loud talker into clipping without lifting the quiet
 talker at all, because the quiet talker is not attenuated — it is being gated.
-Physical placement is worth 6–10 dB and costs nothing: sound falls 6 dB per
-doubling of distance, so moving the device toward the patient transfers level
-from the talker who has 20 dB to spare to the one who needs it.
+Moving the microphone is worth 6 to 10 dB and costs nothing. Sound falls by 6 dB
+each time the distance doubles. Moving the device towards the patient therefore
+takes level from the doctor, who has 20 dB to spare, and gives it to the patient,
+who needs it.
 
 ### 7.1b Speech-level monitoring — `LVL`
 
@@ -1082,10 +1152,9 @@ segmentation, so one measurement serves both. It must be expressed as a
 | `SRS-LVL-07` | The first segment of a session shall be exempt, while the noise-floor estimate is still converging. | M | T | AIMS |
 | `SRS-LVL-08` | Rooms chronically below the envelope shall be reported to operations as an **environment or hardware defect**, not addressed by prompting the doctor. | M | I | AIMS |
 
-`SRS-LVL-08` matters more than the prompt does. A room that sits below the
-envelope every day needs a microphone moved or replaced; asking a clinician to
-raise their voice thirty times a day is not a fix, and treating it as one hides
-a defect behind a human.
+`SRS-LVL-08` matters more than the prompt does. A room that is below the envelope every day needs its microphone moved or
+replaced. Asking a clinician to raise their voice thirty times a day is not a
+fix. It hides a hardware fault behind a person.
 
 ### 7.2 Segmentation — `SEG`
 
@@ -1115,22 +1184,30 @@ lost by cutting often.
 | `SRS-SPL-03` | Segment state shall follow PENDING → COMMITTED → RECEIPTED → PURGED, with QUARANTINED as a terminal branch. | M | T | AIMS |
 | `SRS-SPL-04` | State transitions shall be recorded in an fsynced append-only `journal.jsonl` before the corresponding action. | M | T | AIMS |
 | `SRS-SPL-05` | The spool shall survive an abrupt power loss with no partially-written segment accepted as complete. | M | T | AIMS |
-| `SRS-SPL-06` | The spool shall hold 40 GB by default — about 135 recording-hours, roughly three weeks of one room's work. | M | A | AIMS |
-| `SRS-SPL-07` | The agent shall warn at 50 % and alarm at 80 % of the spool cap, and shall refuse to start a session below 20 GB free. | M | T | AIMS |
+| `SRS-SPL-06` | The buffer shall be sized for a short interruption, not for extended disconnection: 4 GB, about 13 recording-hours. Clinic sites are networked, and the buffer exists to absorb minutes, not weeks. | M | A | AIMS |
+| `SRS-SPL-07` | The agent shall alarm if the buffer exceeds 25 % or if the oldest undelivered segment exceeds 15 minutes. Either condition means delivery has stalled and is reported as a fault. | M | T | AIMS |
 | `SRS-SPL-08` | Local audio shall be deleted **only** on a valid purge receipt, after a 24 h grace period. | M | T | AIMS |
 | `SRS-SPL-09` | A QUARANTINED segment shall be delivered to the server before deletion, exactly as a verified one is. It shall not be deleted while undelivered, and shall not be retained once delivered. | M | T | AIMS |
 | `SRS-SPL-13` | No segment shall remain on the workstation beyond the drainage interval once connectivity permits delivery. The age of the oldest undelivered segment shall be reported in the heartbeat. | M | T | AIMS |
 | `SRS-SPL-14` | The spool shall reach zero whenever the backend has been reachable and idle for one drainage cycle. A non-empty spool on a connected machine is a defect and shall alert. | M | T | AIMS |
 
-**Why the thresholds in `SRS-SPL-07` exist at all.** The spool does not fill
-because audio accumulates in normal operation — in normal operation it drains
-continuously and each segment is deleted within a day. It fills only when
-deletion is *blocked*, and deletion is blocked whenever a purge receipt cannot be
-obtained: the clinic's connectivity is down, the backend is unreachable, the
-archive worker has stopped issuing receipts, or the session is quarantined. The
-40 GB is a buffer sized for three weeks of that condition, and 50 %, 80 % and the
-20 GB floor are the graduated warnings that the buffer is filling. They are not a
-sign of a design fault; they are the instrument that reports one.
+**Nothing is stored on the doctor's PC.** That is the rule, and the rest of this
+section explains how it is kept.
+
+Audio has to exist somewhere for a moment between being recorded and being sent.
+That moment is short. A piece of audio is written to disk, encrypted, sent to the
+server, and deleted as soon as the server confirms it has a good copy. Under
+normal conditions this takes seconds.
+
+The buffer is a shock absorber, not a store. Clinic sites have networks, so long
+disconnection is not what the system is built around. If the link drops for a few
+minutes, the pieces wait and then go. If anything is still waiting after fifteen
+minutes, something has gone wrong, and the system says so.
+
+This matters for two reasons. A clinical PC is not a place anyone can maintain,
+and audio left there is audio AIMS LAB does not control. And a recording that has
+not arrived cannot be transcribed, so anything held back on a laptop is also
+holding back the prescription that depends on it.
 
 `SRS-SPL-13` and `SRS-SPL-14` state the consequence of §7.5a.2: because every
 segment is delivered whatever its verification outcome, a connected machine has
@@ -1267,10 +1344,9 @@ against it.
 
 #### 7.5a.2 Nothing remains on the workstation
 
-The consulting-room PC is a transient buffer and nothing else. It is not a place
-where material waits for a decision, because there is nobody there to make one —
-the clinician is seeing patients, and every design decision in this specification
-has been aimed at removing them from the loop. A file awaiting adjudication on a
+The consulting-room PC is a transient buffer and nothing else. Nothing waits there for a decision, because there is nobody there to make one.
+The clinician is seeing patients. Every decision in this document has been
+aimed at keeping them out of the loop. A file awaiting adjudication on a
 laptop in Ershadnagar is a file nobody will ever adjudicate.
 
 > **`SRS-REC-10`** [M, T, AIMS] Every sealed segment shall reach the server,
@@ -1278,10 +1354,10 @@ laptop in Ershadnagar is a file nobody will ever adjudicate.
 > *where* it lands — the evidence archive or the quarantine area — never
 > *whether* it is sent.
 >
-> **`SRS-REC-11`** [M, T, AIMS] A drainage scheduler shall run independently of
-> the live upload path, sweeping the spool on a fixed interval for anything not
-> yet delivered — pending, failed, quarantined or orphaned by a crash — and
-> shall deliver it. It shall not skip a segment because an earlier one failed.
+> **`SRS-REC-11`** [M, T, AIMS] A scheduler shall sweep the buffer at a fixed
+> interval and deliver anything not yet sent — whether pending, failed,
+> quarantined, or left behind by a crash. It shall run separately from the normal
+> upload path, and shall not skip a piece because an earlier one failed.
 >
 > **`SRS-REC-12`** [M, T, AIMS] Local material shall be deleted once the server
 > acknowledges receipt, whether that receipt is a purge receipt for verified
@@ -1292,10 +1368,11 @@ laptop in Ershadnagar is a file nobody will ever adjudicate.
 > person to open, copy, inspect or delete a file on a clinical PC. There is no
 > supported manual intervention on a workstation.
 >
-> **`SRS-REC-14`** [M, T, AIMS] Adjudication of quarantined material shall be a
-> server-side process that runs to a conclusion on its own — re-verify against
-> the chain, admit to the archive if it reconciles, or file permanently as
-> unverifiable — with a human notified of the outcome rather than blocking it.
+> **`SRS-REC-14`** [M, T, AIMS] Quarantined material shall be reviewed by a
+> server-side process that reaches a conclusion on its own. It checks the piece
+> against the chain again, admits it to the archive if it now matches, or files
+> it permanently as unverifiable. A person is told the outcome; they are not
+> waited for.
 
 **This supersedes the earlier design.** `SRS-SPL-09` and the first version of
 this section held quarantined audio on the workstation indefinitely, pending a
@@ -1348,9 +1425,9 @@ current session's prescription has been built.
 | `SRS-GAT-06` | Every refused trigger shall be logged with patient, doctor and time, and surfaced in operational reporting. | M | T | AIMS |
 | `SRS-GAT-07` | Gate state shall be reported in `status` so CMED can display it. | S | T | AIMS |
 
-**Known residual risk.** If a patient leaves before a prescription is built —
-they were sent for an investigation, they walked out, the doctor referred them —
-the gate never arms, and the session stays open until the doctor stops it or the
+**Known residual risk.** Sometimes a patient leaves before a prescription is
+built: sent for an investigation, referred elsewhere, or simply gone. The gate
+then never arms, and the recording stays open until the doctor stops it or the
 day ends. This is precisely why the overlay's Stop button exists and why it is
 always visible. **OD-04** asks CMED and the clinical team what share of
 consultations end without a prescription, because that number decides whether an
@@ -1466,11 +1543,11 @@ archive tree.
 > **`SRS-DAT-03`** [M, I, Joint] Clinical content crosses the boundary in one
 > direction only: CMED to AIMS LAB. Nothing clinical is ever returned.
 
-**This is a reversal, and it must be recorded as one.** Versions 1.0 to 1.5 of
-this specification stated that prescriptions, diagnoses, notes and patient names
-would never cross the boundary, and the design derived several properties from
-that promise — most visibly the rule that identifiers are "boring" because they
-become directory names carrying nothing sensitive. Ingesting the clinical record
+**This is a reversal, and is recorded as one.** Versions 1.0 to 1.5 said that
+prescriptions, diagnoses, notes and patient names would never cross the boundary.
+Several design decisions rested on that promise. The clearest was the rule that
+identifiers should be dull, because they become folder names holding nothing
+sensitive. Ingesting the clinical record
 (§8.6) changes the classification of the whole archive volume, not merely of the
 new files. Three consequences follow and are specified rather than assumed:
 
@@ -1619,34 +1696,38 @@ signal at each of them. Nothing new is added to the transport.
 > be transmitted to any downstream service that does not require them.
 
 **Reconciliation is the requirement to take seriously.** Audio arrives over a
-store-and-forward path that tolerates three weeks of disconnection; the record
-arrives over a live browser channel that tolerates none. The two will therefore
-diverge routinely, and a nightly reconciliation is the only way that divergence
-becomes visible rather than accumulating.
+buffered path that survives a brief interruption; the record arrives over a live
+browser channel that does not. The two will therefore diverge occasionally, and a
+nightly reconciliation is the only way that divergence becomes visible rather
+than accumulating.
 
 ### 8.7 Database architecture — `DBA`
 
-**One database. Two schemas.** Separation of access is required; separation of
-databases is not the way to get it, and costs the same things it cost in §8.7.2 —
-two connections, two migration paths, and a dashboard that cannot join across the
-line it needs to report on.
+**Two databases, deliberately separate.** They hold different things, are read
+by different people, are governed by different retention rules, and fail
+independently. Keeping them apart means an incident in one cannot expose or
+corrupt the other.
 
-| Schema | Holds | Who may read it |
-|---|---|---|
-| `audio` | Sessions, segments, chain entries, devices, alerts | Operations, research engineering |
-| `clinical` | Demographics, prescriptions, diagnoses, notes, patient names | A separate, narrower role |
+| Database | Holds | Built on | Who reads it |
+|---|---|---|---|
+| **`aims_recordings`** | Hospitals, clinicians, devices, sessions, segments, chain entries, alerts | The catalogue in use today, restructured | Operations, research engineering, the dashboard |
+| **`aims_clinical`** | Demographics, paramedic observations, prescriptions, diagnoses, notes, patient names | New | A separate, narrower clinical role |
 
-> **`SRS-DBA-20`** [M, I, AIMS] Both domains shall live in one database, in two
-> schemas, with privileges granted per schema. A role holding `USAGE` on `audio`
-> and none on `clinical` can search every recording and run the dashboard
-> without being able to read a patient name.
+> **`SRS-DBA-20`** [M, I, AIMS] The recording catalogue and the clinical record
+> shall be separate databases with separate credentials. No application role
+> shall hold write access to both.
 >
-> **`SRS-DBA-21`** [M, T, AIMS] Cross-schema joins shall be available to roles
-> holding both, so that reconciliation and reporting are single queries.
+> **`SRS-DBA-21`** [M, T, AIMS] `patient_id` shall be the join key between them,
+> and shall be the only field they have in common. Reconciliation across the two
+> shall be performed by a dedicated read-only role.
+>
+> **`SRS-DBA-22b`** [M, I, AIMS] The dashboard shall read the recording
+> catalogue only, and shall require no credential for the clinical database.
 
-This gives the isolation the two-database design was reaching for, enforced by
-the database rather than by which connection string an application happened to
-open, and it keeps one migration path.
+Separation costs a join that must be made in application code rather than by the
+planner. That cost is accepted: it is the price of being able to give an engineer
+everything they need to operate the fleet without giving them a single patient
+name.
 
 #### 8.7.1 The audio catalogue
 
@@ -1821,11 +1902,10 @@ blob:
 > **`SRS-DSH-07`** [S, D, AIMS] Counts shall be derivable to their underlying
 > rows. A figure a reader cannot drill into is a figure they cannot act on.
 
-`SRS-DSH-03` is the one that changes behaviour rather than reporting it. A
-quarantined session or a forced termination is presently visible only to whoever
-reads an alert table or a log file on the machine itself; surfacing both against
-clinic and clinician makes a recurring problem in one room visible as a pattern
-rather than as a series of unrelated incidents.
+`SRS-DSH-03` is the one that changes behaviour rather than reporting it. Today a quarantined session or a forced stop is visible only to whoever reads
+an alert table, or a log file on the machine itself. Showing both against
+clinic and clinician turns a recurring problem in one room into a visible
+pattern, instead of a series of unrelated incidents.
 
 ---
 
@@ -1856,7 +1936,7 @@ rather than as a series of unrelated incidents.
 
 | ID | Requirement | Pri | Ver |
 |---|---|---|---|
-| `SRS-NFR-01` | The agent shall record with the backend entirely unreachable, for up to three weeks of one room's work. | M | D |
+| `SRS-NFR-01` | The agent shall continue recording across a short network interruption and deliver the backlog automatically when the link returns. | M | D |
 | `SRS-NFR-02` | Backend availability target: 99.5 % monthly, excluding planned maintenance. | S | A |
 | `SRS-NFR-03` | A backend deployment shall not interrupt any recording in progress. | M | D |
 | `SRS-NFR-04` | No single component failure shall cause silent loss of audio; every loss path shall raise an alert. | M | T |
@@ -2177,10 +2257,9 @@ meeting.
 | — | The durability checkpoint (`SRS-SPL-10..12`) | AIMS |
 | — | Database production hardening | AIMS |
 
-Every item is AIMS LAB's except one. **The trigger payload is the single place
-both sides change at once**, which means §6.1.3 and §5.3 must ship together: an
-integration written against the new five-field trigger will otherwise be talking
-to an agent that still expects a signed grant.
+Every item is AIMS LAB's except one. **The trigger is the one place both sides change at once.** So §6.1.3 and §5.3
+must ship together. Otherwise an integration written for the new five-field
+trigger will be talking to an agent that still expects a signed grant.
 
 ### 13.2 CMED's work, itemised
 
@@ -2450,10 +2529,10 @@ Three separate bearer credentials — `X-Device-Token`, `X-Worker-Key`,
 > and interactive documentation at `/docs`, so the collection can be regenerated
 > rather than hand-maintained.
 >
-> **`SRS-API-04`** [S, D, AIMS] A partner-facing WebSocket test page shall be
-> provided — a single HTML file that connects to `127.0.0.1:5050`, sends a
-> trigger and a flag, and prints the replies — because Postman does not exercise
-> the loopback WebSocket surface CMED actually implements.
+> **`SRS-API-04`** [S, D, AIMS] A test page shall be provided for partners: one
+> HTML file that connects to `127.0.0.1:5050`, sends a trigger and an arm signal,
+> and prints the replies. Postman cannot exercise the loopback connection CMED
+> actually implements, so this is the tool their developer will use first.
 
 `SRS-API-04` matters more than the Postman collection for CMED specifically:
 their entire integration is the WebSocket, which Postman is the wrong tool for.
@@ -2485,6 +2564,8 @@ their entire integration is the WebSocket, which Postman is the wrong tool for.
 | Version | Date | Change |
 |---|---|---|
 | 1.0 | 25 August 2026 | First baseline for the CMED integration meeting |
+| 2.0 | 10 September 2026 | Readability pass: §1.7 added as a plain-language reading guide and glossary, and the longest passages rewritten as shorter sentences. Channel B documented (§3.3a) — CMED sends clinical data directly to the AIMS LAB backend, which reverses the earlier claim that no such path existed. §7.3 rewritten around the rule that nothing is stored on the doctor's PC. |
+| 1.8 | 10 September 2026 | The local buffer is a shock absorber, not an offline-first store: clinic sites are networked, so it is sized for minutes (4 GB) and anything undelivered after fifteen minutes is a fault. The recording catalogue and the clinical record are two separate databases with separate credentials, joined on `patient_id` only. |
 | 1.7 | 9 September 2026 | Quarantined material is delivered like any other, on a drainage scheduler; nothing remains on a workstation and no path requires a person to touch a clinical PC (`SRS-REC-10`–`14`, `SRS-SPL-09/13/14`). One database with two schemas replaces the two-database split. The search problem re-diagnosed: the indexes already existed, so `SRS-DBA-22`–`25` address the split catalogue, autosuspend and substring search instead. |
 | 1.6 | 9 September 2026 | Clinical record ingestion (§8.6), database architecture (§8.7) and the operational dashboard (§8.8) added; §8.1 reversed and the reversal recorded, with `SRS-DAT-15/16` on consent and access. `SRS-SPL-13/14` close the one case where quarantined material could consume the spool unreported. |
 | 1.5 | 5 September 2026 | Prepared for submission. The six diagrams that were mermaid source are now drawn figures, so the document is complete in print; figures renumbered into order of appearance. |
