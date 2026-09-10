@@ -18,13 +18,14 @@ from the path, at a sustained 88.2 kB s⁻¹.
 The interoperability layer is agnostic to the partner record system. Rather
 than requiring each vendor to integrate with a remote service, it is exposed
 as a loopback interface on the clinician's workstation, addressed by a small
-quantity of JavaScript within the existing EHR page. One contract is therefore
-implemented identically for the three partner systems in the deployment —
-CMED, Aalo and Amader Susastho — none of which holds cryptographic material,
-stores audio, exposes an endpoint, or alters its server infrastructure. The
-architecture admits no inbound connection from a partner system to the
-research backend; all traffic crossing an organisational boundary originates
-within the clinic.
+quantity of JavaScript within the existing EHR page. One contract is therefore implemented identically for the three partner
+systems in the deployment — CMED, Aalo and Amader Susastho — none of which
+holds cryptographic material, stores audio, or alters its server
+infrastructure. Two channels are used, and the separation is deliberate. Control signals reach
+the daemon on the clinician's own machine and never leave it, because they
+must take effect the moment a patient is opened. Clinical data travels server
+to server to the research backend, so no sensitive content passes through a
+browser. Audio travels towards the partner system on neither channel.
 
 [Insert Figure X: Architecture block diagram delineating the trust boundaries
 between the local workstation, the partner EHR node and the AIMS Lab backend,
@@ -104,9 +105,9 @@ observed in pilot operation, and not recoverable afterwards.
 ### Device Binding and Cryptographic Security
 
 Access to the acquisition path is constrained by hardware-anchored
-authentication. Each workstation is commissioned once by an administrator,
-using a single-use activation credential exchanged for a device identity and
-an asymmetric key pair generated on, and never leaving, that machine; the
+authentication. Each workstation is commissioned once by an administrator, using a single-use
+activation credential. That credential is exchanged for a device identity and
+an asymmetric key pair generated on, and never leaving, that machine. The
 backend retains the credential only as a cryptographic digest. Binding is
 between workstation and research backend, and is therefore independent of the
 partner record system.

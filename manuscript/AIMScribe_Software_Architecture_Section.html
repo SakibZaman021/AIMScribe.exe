@@ -16,76 +16,74 @@ figcaption { font-size:9.5pt; line-height:1.45; text-align:justify;
 </style></head><body><h2>Software Architecture and Data Collection System</h2>
 <h3>System Architecture and Interoperability</h3>
 <p>AIMScribe was developed not as a clinical application but as an event-driven, decentralised agent architecture, in which each consulting room operates as an autonomous node. The endpoint element, <code>aimscribe.exe</code>, is a lightweight edge daemon presented to the clinician only as a system-tray icon. Acquisition, segmentation and transmission run on independent threads and an asynchronous transport loop, so that disk and network latency cannot propagate back into the audio path. This separation is a deployment requirement, not an optimisation: the study sites run legacy, lower-specification workstations on which any blocking operation would degrade the electronic health record (EHR) in active use. Audio is acquired as linear PCM at the capture device's native sample rate, with operating-system resampling and channel down-mixing excluded from the path, at a sustained 88.2 kB s⁻¹.</p>
-<p>The interoperability layer is agnostic to the partner record system. Rather than requiring each vendor to integrate with a remote service, it is exposed as a loopback interface on the clinician's workstation, addressed by a small quantity of JavaScript within the existing EHR page. One contract is therefore implemented identically for the three partner systems in the deployment — CMED, Aalo and Amader Susastho — none of which holds cryptographic material, stores audio, exposes an endpoint, or alters its server infrastructure. The architecture admits no inbound connection from a partner system to the research backend; all traffic crossing an organisational boundary originates within the clinic.</p>
-<figure><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 880" color="#1a1a1a" role="img" aria-label="Architecture block diagram. The third-party electronic health record node serves the clinical page to the consulting-room workstation over HTTPS. That page signals the aimscribe.exe tray daemon over a loopback channel confined to the same machine. Encrypted, mutually authenticated pathways carry sealed audio and control traffic to the AIMS Lab backend. No network path exists between the EHR node and the backend." font-family="Helvetica, Arial, sans-serif">
+<p>The interoperability layer is agnostic to the partner record system. Rather than requiring each vendor to integrate with a remote service, it is exposed as a loopback interface on the clinician's workstation, addressed by a small quantity of JavaScript within the existing EHR page. One contract is therefore implemented identically for the three partner systems in the deployment — CMED, Aalo and Amader Susastho — none of which holds cryptographic material, stores audio, or alters its server infrastructure. Two channels are used, and the separation is deliberate. Control signals reach the daemon on the clinician's own machine and never leave it, because they must take effect the moment a patient is opened. Clinical data travels server to server to the research backend, so no sensitive content passes through a browser. Audio travels towards the partner system on neither channel.</p>
+<figure><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 880" color="#1a1a1a" role="img" aria-label="Architecture block diagram. The third-party electronic health record node serves the clinical page to the consulting-room workstation over HTTPS, and sends clinical data directly to the AIMS Lab backend over a server-to-server channel. The page signals the aimscribe.exe tray daemon over a loopback channel confined to the same machine. Audio travels only from the workstation to the backend, and never towards the EHR node." font-family="Helvetica, Arial, sans-serif">
 <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker><marker id="arA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b3261e"/></marker></defs>
-<rect x="150" y="34" width="360" height="78" rx="8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="5 4" opacity="0.55"/>
+<rect x="150" y="34" width="350" height="78" rx="8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="5 4" opacity="0.55"/>
 <text x="150" y="26" font-size="11" font-weight="600" fill="currentColor">THIRD-PARTY EHR NODE</text>
-<rect x="168" y="50" width="324" height="48" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
-<text x="330.0" y="71.04" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor">CMED · Aalo · Amader Susastho</text>
-<text x="330.0" y="85.14" font-size="9" text-anchor="middle" fill="currentColor">one interface contract, three vendors</text>
-<rect x="20" y="150" width="620" height="386" rx="8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="5 4" opacity="0.55"/>
+<rect x="168" y="50" width="314" height="48" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="325.0" y="71.04" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor">CMED · Aalo · Amader Susastho</text>
+<text x="325.0" y="85.14" font-size="9" text-anchor="middle" fill="currentColor">one interface contract, three vendors</text>
+<rect x="20" y="150" width="565" height="386" rx="8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="5 4" opacity="0.55"/>
 <text x="20" y="142" font-size="11" font-weight="600" fill="currentColor">CONSULTING-ROOM WORKSTATION</text>
-<rect x="40" y="176" width="268" height="56" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
-<text x="174.0" y="201.335" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor">Microphone array</text>
-<text x="174.0" y="214.965" font-size="8.5" text-anchor="middle" fill="currentColor">fixed placement, no vendor processing</text>
-<rect x="352" y="176" width="268" height="56" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
-<text x="486.0" y="201.04" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor">EHR page in browser</text>
-<text x="486.0" y="215.14" font-size="9" text-anchor="middle" fill="currentColor">dispatches the trigger</text>
-<rect x="40" y="262" width="580" height="256" rx="6" fill="none" stroke="currentColor" stroke-width="1.8"/>
-<text x="330" y="282" font-size="11.5" font-weight="600" text-anchor="middle" fill="currentColor">aimscribe.exe — tray daemon</text>
-<rect x="58" y="294" width="544" height="34" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
-<text x="330.0" y="314.5" font-size="10" text-anchor="middle" fill="currentColor">Acquisition · linear PCM at native rate</text>
-<rect x="58" y="338" width="544" height="34" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
-<text x="330.0" y="358.5" font-size="10" text-anchor="middle" fill="currentColor">Segmentation · adaptive noise floor</text>
-<rect x="58" y="382" width="544" height="34" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
-<text x="330.0" y="402.5" font-size="10" text-anchor="middle" fill="currentColor">Encrypted spool · AES-256-GCM, 40 GB</text>
-<rect x="58" y="426" width="544" height="34" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
-<text x="330.0" y="446.5" font-size="10" text-anchor="middle" fill="currentColor">Hash chain · Ed25519, per session</text>
-<rect x="58" y="470" width="544" height="34" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
-<text x="330.0" y="490.5" font-size="10" text-anchor="middle" fill="currentColor">Asynchronous transport</text>
-<path d="M330,112 L330,170" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
-<text x="340" y="136" font-size="9" fill="currentColor">HTTPS page delivery</text>
-<path d="M486,232 L486,256" fill="none" stroke="#b3261e" stroke-width="2.2" marker-end="url(#arA)"/>
-<text x="496" y="248" font-size="9" fill="#b3261e">loopback trigger</text>
-<path d="M174,232 L174,288" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
-<text x="184" y="256" font-size="9" fill="currentColor">analogue audio</text>
-<path d="M330,328 L330,338" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
-<path d="M330,372 L330,382" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
-<path d="M330,416 L330,426" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
-<path d="M330,460 L330,470" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
-<rect x="20" y="594" width="620" height="258" rx="8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="5 4" opacity="0.55"/>
+<rect x="36" y="176" width="250" height="56" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="161.0" y="201.335" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor">Microphone array</text>
+<text x="161.0" y="214.965" font-size="8.5" text-anchor="middle" fill="currentColor">fixed placement, no processing</text>
+<rect x="318" y="176" width="250" height="56" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="443.0" y="201.04" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor">EHR page in browser</text>
+<text x="443.0" y="215.14" font-size="9" text-anchor="middle" fill="currentColor">dispatches the trigger</text>
+<rect x="36" y="262" width="532" height="256" rx="6" fill="none" stroke="currentColor" stroke-width="1.8"/>
+<text x="302" y="282" font-size="11.5" font-weight="600" text-anchor="middle" fill="currentColor">aimscribe.exe — tray daemon</text>
+<rect x="54" y="294" width="496" height="34" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="302.0" y="314.5" font-size="10" text-anchor="middle" fill="currentColor">Acquisition · linear PCM at native rate</text>
+<rect x="54" y="338" width="496" height="34" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="302.0" y="358.5" font-size="10" text-anchor="middle" fill="currentColor">Segmentation · adaptive noise floor</text>
+<rect x="54" y="382" width="496" height="34" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="302.0" y="402.5" font-size="10" text-anchor="middle" fill="currentColor">Encrypted buffer · AES-256-GCM</text>
+<rect x="54" y="426" width="496" height="34" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="302.0" y="446.5" font-size="10" text-anchor="middle" fill="currentColor">Hash chain · Ed25519, per session</text>
+<rect x="54" y="470" width="496" height="34" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="302.0" y="490.5" font-size="10" text-anchor="middle" fill="currentColor">Asynchronous transport</text>
+<path d="M302,112 L302,170" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<text x="312" y="136" font-size="9" fill="currentColor">HTTPS page delivery</text>
+<path d="M443,232 L443,256" fill="none" stroke="#b3261e" stroke-width="2.2" marker-end="url(#arA)"/>
+<text x="453" y="248" font-size="9" font-weight="600" fill="#b3261e">Channel A</text>
+<path d="M161,232 L161,288" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<text x="171" y="256" font-size="9" fill="currentColor">analogue audio</text>
+<path d="M302,328 L302,338" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<path d="M302,372 L302,382" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<path d="M302,416 L302,426" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<path d="M302,460 L302,470" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<rect x="20" y="594" width="565" height="258" rx="8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="5 4" opacity="0.55"/>
 <text x="20" y="586" font-size="11" font-weight="600" fill="currentColor">AIMS LAB BACKEND</text>
-<rect x="40" y="620" width="268" height="52" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
-<text x="174.0" y="643.0400000000001" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor">API</text>
-<text x="174.0" y="657.1400000000001" font-size="9" text-anchor="middle" fill="currentColor">authorisation · verification</text>
-<rect x="352" y="620" width="268" height="52" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
-<text x="486.0" y="643.0400000000001" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor">Metadata store</text>
-<text x="486.0" y="657.1400000000001" font-size="9" text-anchor="middle" fill="currentColor">sessions · audit log</text>
-<rect x="40" y="700" width="268" height="52" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
-<text x="174.0" y="723.0400000000001" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor">Object store</text>
-<text x="174.0" y="737.1400000000001" font-size="9" text-anchor="middle" fill="currentColor">sealed segments</text>
-<rect x="352" y="700" width="268" height="52" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
-<text x="486.0" y="723.0400000000001" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor">Archive</text>
-<text x="486.0" y="737.1400000000001" font-size="9" text-anchor="middle" fill="currentColor">verified recordings</text>
-<rect x="40" y="780" width="580" height="46" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
-<text x="330.0" y="800.16" font-size="10.5" font-weight="600" text-anchor="middle" fill="currentColor">Server-side verification</text>
-<text x="330.0" y="813.67" font-size="8.5" text-anchor="middle" fill="currentColor">every segment re-read and re-hashed before acceptance</text>
-<path d="M308,646 L346,646" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
-<path d="M174,672 L174,694" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
-<path d="M308,726 L346,726" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
-<path d="M174,752 L174,774" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
-<path d="M486,752 L486,774" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
-<path d="M330,518 L330,614" fill="none" stroke="#b3261e" stroke-width="2.4" marker-end="url(#arA)"/>
-<text x="340" y="560" font-size="9" fill="#b3261e">TLS · device token</text>
-<text x="340" y="574" font-size="9" fill="#b3261e">sealed payload</text>
-<path d="M510,73 L572,73" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="4 5"/>
-<path d="M580,63 L600,83" fill="none" stroke="#b3261e" stroke-width="2.2"/>
-<path d="M600,63 L580,83" fill="none" stroke="#b3261e" stroke-width="2.2"/>
-<text x="515" y="96" font-size="9" font-weight="600" fill="#b3261e">no path exists between</text>
-<text x="515" y="109" font-size="9" fill="#b3261e">the EHR node and backend</text>
-<text x="20" y="872" font-size="9" fill="#b3261e">Accented pathways are encrypted and mutually authenticated.</text>
-</svg><figcaption><strong>Figure 1 | Architecture block diagram.</strong> Boundaries of the consulting-room workstation, the third-party electronic health record (EHR) node and the AIMS Lab backend. The EHR node serves the clinical page over HTTPS; that page signals the aimscribe.exe tray daemon over a loopback channel confined to the same machine. Accented pathways are encrypted and mutually authenticated, carrying sealed audio and device-authenticated control traffic. No network path exists between the EHR node and the backend.</figcaption></figure>
+<rect x="36" y="620" width="250" height="52" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="161.0" y="643.0400000000001" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor">API</text>
+<text x="161.0" y="657.1400000000001" font-size="9" text-anchor="middle" fill="currentColor">authorisation · verification</text>
+<rect x="318" y="620" width="250" height="52" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="443.0" y="643.0400000000001" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor">Clinical store</text>
+<text x="443.0" y="657.1400000000001" font-size="9" text-anchor="middle" fill="currentColor">prescriptions · notes</text>
+<rect x="36" y="700" width="250" height="52" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="161.0" y="723.0400000000001" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor">Object store</text>
+<text x="161.0" y="737.1400000000001" font-size="9" text-anchor="middle" fill="currentColor">sealed segments</text>
+<rect x="318" y="700" width="250" height="52" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="443.0" y="723.0400000000001" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor">Archive</text>
+<text x="443.0" y="737.1400000000001" font-size="9" text-anchor="middle" fill="currentColor">verified recordings</text>
+<rect x="36" y="780" width="532" height="46" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="302.0" y="800.16" font-size="10.5" font-weight="600" text-anchor="middle" fill="currentColor">Server-side verification</text>
+<text x="302.0" y="813.67" font-size="8.5" text-anchor="middle" fill="currentColor">every segment re-read and re-hashed before acceptance</text>
+<path d="M161,672 L161,694" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<path d="M443,672 L443,694" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<path d="M161,752 L161,774" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<path d="M443,752 L443,774" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<path d="M302,518 L302,614" fill="none" stroke="#b3261e" stroke-width="2.4" marker-end="url(#arA)"/>
+<text x="312" y="552" font-size="9" fill="#b3261e">audio, encrypted</text>
+<text x="312" y="566" font-size="9" fill="#b3261e">TLS · device token</text>
+<path d="M500,73 L640,73 L640,646 L592,646" fill="none" stroke="#b3261e" stroke-width="2.4" marker-end="url(#arA)"/>
+<text x="590" y="100" font-size="8.5" font-weight="600" fill="#b3261e">Channel B</text>
+<text x="590" y="113" font-size="8.5" fill="#b3261e">clinical</text>
+<text x="590" y="126" font-size="8.5" fill="#b3261e">data</text>
+<text x="20" y="872" font-size="9" fill="#b3261e">Accented pathways are encrypted and mutually authenticated. Audio never travels towards the EHR node.</text>
+</svg><figcaption><strong>Figure 1 | Architecture block diagram.</strong> Boundaries of the consulting-room workstation, the third-party electronic health record (EHR) node and the AIMS Lab backend. The EHR node serves the clinical page over HTTPS. That page signals the aimscribe.exe tray daemon over a loopback channel confined to the same machine (Channel A), while clinical data reaches the backend server to server (Channel B). Accented pathways are encrypted and mutually authenticated. Audio travels only from the workstation to the backend, and never towards the EHR node.</figcaption></figure>
 <h3>Zero-Touch Trigger Mechanism and Acoustic Pre-processing</h3>
 <p>Acquisition imposes no interface burden on the consultation. Requiring a clinician to start and stop a recorder introduces cognitive load when attention is owed to the patient, and such controls are reliably forgotten. The trigger is therefore derived from an action already performed: an EHR interface event, the selection of patient details, dispatches a signal over the loopback channel to the local daemon, and background capture begins. Authorisation is obtained from the backend in parallel with acquisition rather than before it. Transient network latency thus cannot displace the opening seconds of the encounter, in which the presenting complaint is typically stated.</p>
 <p>Triggering is synchronised with a fixed acoustic configuration in each room, necessary because the enclosures are acoustically hostile: ceiling fans, corridor traffic and paediatric distress are continuous rather than intermittent. Segment boundaries are placed using short-term root-mean-square energy together with zero-crossing rate, evaluated against an adaptive noise floor so that the criterion tracks the room rather than assuming a fixed threshold. The zero-crossing term keeps boundaries out of unvoiced fricatives, which carry low energy and mimic pauses. Silence positions boundaries but is never excised: the archived recording is retained bit-identical to the acquired signal. Material for downstream speech recognition and diarisation is derived from that archive as a separate, disposable rendition.</p>
@@ -146,6 +144,6 @@ figcaption { font-size:9.5pt; line-height:1.45; text-align:justify;
 <h3>Deterministic Data Labelling and Synchronisation</h3>
 <p>Each archived recording is named under a fixed taxonomy, <code>PatientID_DoctorID_HospitalID_StartTime_EndTime_Date</code>, which functions as a relational mapping strategy rather than a filing convention. Identifiers are supplied by the record system at triggering and constrained to a restricted character set, since they become directory names on the archival volume. Consultations proceed back-to-back at intervals of twenty to thirty seconds; the start time of a succeeding encounter is therefore adopted as the end time of its predecessor, so that recordings tile the session without gap or overlap. Referential integrity between the audio corpus and the structured record is thus established at acquisition rather than reconstructed afterwards. An interlock further withholds session closure until the encounter has been concluded in the record system. Inadvertent selection of a subsequent patient therefore cannot truncate an active consultation — a failure mode observed in pilot operation, and not recoverable afterwards.</p>
 <h3>Device Binding and Cryptographic Security</h3>
-<p>Access to the acquisition path is constrained by hardware-anchored authentication. Each workstation is commissioned once by an administrator, using a single-use activation credential exchanged for a device identity and an asymmetric key pair generated on, and never leaving, that machine; the backend retains the credential only as a cryptographic digest. Binding is between workstation and research backend, and is therefore independent of the partner record system.</p>
+<p>Access to the acquisition path is constrained by hardware-anchored authentication. Each workstation is commissioned once by an administrator, using a single-use activation credential. That credential is exchanged for a device identity and an asymmetric key pair generated on, and never leaving, that machine. The backend retains the credential only as a cryptographic digest. Binding is between workstation and research backend, and is therefore independent of the partner record system.</p>
 <p>Registration establishes that a machine may record at all; a separate authorisation — short-lived, single-use, issued per encounter and verified against a pinned public key — establishes that a particular request is legitimate. The two controls are deliberately distinct: an enrolled workstation without the second would record for any page loaded in the clinician's browser. Compromise of EHR access alone therefore confers no capability to initiate or intercept acquisition.</p>
 <p>Integrity is maintained end-to-end by a per-session hash chain. Each entry — session opening, every segment, every interruption, and closure — embeds the digest of its predecessor and is signed by the device key, rendering deletion, reordering and substitution detectable. Segments are verified on arrival by re-reading the stored object and recomputing its digest server-side. Local material is released for deletion only against a signed purge receipt attesting that a verified archival copy exists; any discrepancy quarantines the session, withholds the receipt and preserves both copies. A continuous chain of custody is thereby maintained from acquisition to archive, under which tampering, silent truncation and corruption at rest are detectable rather than merely improbable.</p></body></html>

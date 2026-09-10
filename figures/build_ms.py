@@ -22,11 +22,12 @@ CHROME = r"C:/Program Files/Google/Chrome/Application/chrome.exe"
 FIG1_CAP = ("**Figure 1 | Architecture block diagram.** Boundaries of the "
             "consulting-room workstation, the third-party electronic health record "
             "(EHR) node and the AIMS Lab backend. The EHR node serves the clinical "
-            "page over HTTPS; that page signals the aimscribe.exe tray daemon over a "
-            "loopback channel confined to the same machine. Accented pathways are "
-            "encrypted and mutually authenticated, carrying sealed audio and "
-            "device-authenticated control traffic. No network path exists between the "
-            "EHR node and the backend.")
+            "page over HTTPS. That page signals the aimscribe.exe tray daemon over a "
+            "loopback channel confined to the same machine (Channel A), while "
+            "clinical data reaches the backend server to server (Channel B). "
+            "Accented pathways are encrypted and mutually authenticated. Audio "
+            "travels only from the workstation to the backend, and never towards the "
+            "EHR node.")
 
 FIG2_CAP = ("**Figure 2 | Sequence of the acquisition pathway.** Selection of patient "
             "details dispatches a trigger to the local daemon. Acquisition begins "
