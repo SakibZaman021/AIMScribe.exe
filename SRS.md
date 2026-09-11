@@ -7,7 +7,7 @@
 | | |
 |---|---|
 | Document | AIMS-SRS-001 |
-| Version | 2.0 |
+| Version | 2.1 |
 | Date | 9 September 2026 |
 | Status | Baseline for integration. Items marked **OD-nn** are open and need a decision. |
 | Relationship to other documents | Complements `CMED_INTEGRATION_README.md` (narrative) with numbered, testable requirements. |
@@ -1186,7 +1186,7 @@ lost by cutting often.
 | `SRS-SPL-05` | The spool shall survive an abrupt power loss with no partially-written segment accepted as complete. | M | T | AIMS |
 | `SRS-SPL-06` | The buffer shall be sized for a short interruption, not for extended disconnection: 4 GB, about 13 recording-hours. Clinic sites are networked, and the buffer exists to absorb minutes, not weeks. | M | A | AIMS |
 | `SRS-SPL-07` | The agent shall alarm if the buffer exceeds 25 % or if the oldest undelivered segment exceeds 15 minutes. Either condition means delivery has stalled and is reported as a fault. | M | T | AIMS |
-| `SRS-SPL-08` | Local audio shall be deleted **only** on a valid purge receipt, after a 24 h grace period. | M | T | AIMS |
+| `SRS-SPL-08` | Local audio shall be deleted on a valid receipt, without a grace period. The receipt is the proof; waiting a further day adds nothing to it. | M | T | AIMS |
 | `SRS-SPL-09` | A QUARANTINED segment shall be delivered to the server before deletion, exactly as a verified one is. It shall not be deleted while undelivered, and shall not be retained once delivered. | M | T | AIMS |
 | `SRS-SPL-13` | No segment shall remain on the workstation beyond the drainage interval once connectivity permits delivery. The age of the oldest undelivered segment shall be reported in the heartbeat. | M | T | AIMS |
 | `SRS-SPL-14` | The spool shall reach zero whenever the backend has been reachable and idle for one drainage cycle. A non-empty spool on a connected machine is a defect and shall alert. | M | T | AIMS |
@@ -1342,6 +1342,49 @@ Separating the two goals lets both hold. The verified archive stays strictly
 verified; the unverifiable recording arrives anyway, with its defect recorded
 against it.
 
+#### 7.5a.1b Two reasons audio is still found on a workstation
+
+Delivery is not what fails. The store-and-forward path works: a session left
+undelivered when a laptop is shut down is adopted from the buffer at the next
+start and sent automatically. That behaviour is confirmed in the field and in the
+code. What does not complete is the **deletion** afterwards, and there are
+exactly two causes, both deliberate decisions rather than defects.
+
+**Cause 1 — deletion waits for the archive, not for custody.** A receipt is
+issued only after the archive worker has fetched the session, concatenated it,
+written it to the archive volume and reported completion. Until then the
+receipts endpoint returns nothing. So a recording can be fully uploaded,
+verified by re-hashing, and still sit on the laptop indefinitely, because a
+second process elsewhere in AIMS LAB has not yet run. The workstation is made to
+wait on something it cannot see, cannot influence, and has no stake in.
+
+**Cause 2 — a grace window the agent must be running to outlive.** Deletion was
+further delayed by twenty-four hours after the receipt arrived. A clinical PC is
+switched on for clinic hours and shut down immediately afterwards, so the moment
+at which the grace expires routinely falls when the machine is off. The delete
+is then deferred to the next session, and the next, and the audio persists for
+days. The grace window was intended as a safety margin, but the server has
+already re-read and re-hashed the stored bytes before issuing the receipt, so it
+was protecting against a failure that verification had already excluded.
+
+> **`SRS-REC-15`** [M, T, AIMS] A receipt authorising deletion shall be issued
+> once the backend holds a verified copy, and shall not wait on archiving.
+> Archiving is an internal AIMS LAB step and shall not determine what is held on
+> a clinical PC.
+>
+> **`SRS-REC-16`** [M, T, AIMS] Deletion shall follow the receipt immediately.
+> No grace period shall stand between a verified receipt and the removal of the
+> local copy.
+>
+> **`SRS-REC-17`** [M, T, AIMS] The agent shall sweep for deletable material at
+> startup, before it begins recording, so that a machine switched on in the
+> morning clears anything left from the previous day within seconds.
+>
+> **`SRS-REC-18`** [M, T, AIMS] The agent shall attempt a final delivery and
+> sweep on shutdown, within a bounded time, so that the common case — a laptop
+> closed immediately after the last consultation — leaves as little behind as
+> possible.
+
 #### 7.5a.2 Nothing remains on the workstation
 
 The consulting-room PC is a transient buffer and nothing else. Nothing waits there for a decision, because there is nobody there to make one.
@@ -1360,9 +1403,9 @@ laptop in Ershadnagar is a file nobody will ever adjudicate.
 > upload path, and shall not skip a piece because an earlier one failed.
 >
 > **`SRS-REC-12`** [M, T, AIMS] Local material shall be deleted once the server
-> acknowledges receipt, whether that receipt is a purge receipt for verified
-> audio or an acknowledgement of quarantine intake. Deletion follows custody
-> transfer, not verification outcome.
+> acknowledges custody, whether that acknowledgement is a receipt for verified
+> audio or an intake acknowledgement for quarantined audio. Deletion follows
+> custody transfer, not verification outcome, and not archiving.
 >
 > **`SRS-REC-13`** [M, I, AIMS] No routine or exceptional path shall require a
 > person to open, copy, inspect or delete a file on a clinical PC. There is no
@@ -1584,7 +1627,7 @@ new files. Three consequences follow and are specified rather than assumed:
 
 | Data | Location | Retention |
 |---|---|---|
-| Spooled encrypted segments | Consulting-room PC | Until purge receipt + 24 h |
+| Buffered encrypted segments | Consulting-room PC | Until the receipt, then deleted immediately |
 | Segment objects | Object storage | Until archived and verified |
 | Archived WAV | AIMS LAB archive volume | **OD-06 — undecided** |
 | Session metadata | Database | Indefinite |
@@ -2564,6 +2607,7 @@ their entire integration is the WebSocket, which Postman is the wrong tool for.
 | Version | Date | Change |
 |---|---|---|
 | 1.0 | 25 August 2026 | First baseline for the CMED integration meeting |
+| 2.1 | 11 September 2026 | Why audio is still found on workstations, traced in code: delivery works, deletion does not complete. A receipt is issued only after archiving, and was then followed by a 24-hour grace the agent had to be running to outlive — on a machine switched off after clinic. `SRS-REC-15`–`18` move the receipt to custody rather than archiving, remove the grace, and sweep at startup and shutdown. `SRS-SPL-08` amended. |
 | 2.0 | 10 September 2026 | Readability pass: §1.7 added as a plain-language reading guide and glossary, and the longest passages rewritten as shorter sentences. Channel B documented (§3.3a) — CMED sends clinical data directly to the AIMS LAB backend, which reverses the earlier claim that no such path existed. §7.3 rewritten around the rule that nothing is stored on the doctor's PC. |
 | 1.8 | 10 September 2026 | The local buffer is a shock absorber, not an offline-first store: clinic sites are networked, so it is sized for minutes (4 GB) and anything undelivered after fifteen minutes is a fault. The recording catalogue and the clinical record are two separate databases with separate credentials, joined on `patient_id` only. |
 | 1.7 | 9 September 2026 | Quarantined material is delivered like any other, on a drainage scheduler; nothing remains on a workstation and no path requires a person to touch a clinical PC (`SRS-REC-10`–`14`, `SRS-SPL-09/13/14`). One database with two schemas replaces the two-database split. The search problem re-diagnosed: the indexes already existed, so `SRS-DBA-22`–`25` address the split catalogue, autosuspend and substring search instead. |
