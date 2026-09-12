@@ -38,7 +38,10 @@ def convert(md: str, svg_inline=True) -> str:
             while k < n and not lines[k].strip():
                 k += 1
             if k < n and lines[k].startswith("**Figure"):
-                cap = inline(re.sub(r"\s+", " ", lines[k])); i = k
+                buf = []
+                while k < n and lines[k].strip():
+                    buf.append(lines[k]); k += 1
+                cap = inline(re.sub(r"\s+", " ", " ".join(buf))); i = k - 1
             svg = (FIGS / m.group(1)).read_text(encoding="utf-8").strip()
             out.append(f"<figure>{svg}<figcaption>{cap}</figcaption></figure>")
             i += 1; continue
@@ -176,7 +179,10 @@ def main() -> None:
             while k < len(lines) and not lines[k].strip():
                 k += 1
             if k < len(lines) and lines[k].startswith("**Figure"):
-                cap = d.add_paragraph(); rich(cap, lines[k].strip(), size=9); i = k
+                buf = []
+                while k < len(lines) and lines[k].strip():
+                    buf.append(lines[k].strip()); k += 1
+                cap = d.add_paragraph(); rich(cap, " ".join(buf), size=9); i = k - 1
             i += 1; continue
         m = re.match(r"(#{1,3})\s+(.*)$", ln)
         if m:

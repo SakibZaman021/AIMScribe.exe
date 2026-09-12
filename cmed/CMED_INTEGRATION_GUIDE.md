@@ -2,7 +2,7 @@
 
 **What CMED needs to build, and what CMED needs to send.**
 
-AIMS LAB · Independent University, Bangladesh · 10 September 2026
+AIMS LAB · Independent University, Bangladesh · 12 September 2026
 
 ---
 
@@ -17,7 +17,7 @@ So CMED tells it. Three signals, across two channels.
 | | Signal | Sent when | Sent to |
 |---|---|---|---|
 | **API 1** | Trigger | The doctor opens the patient's details | The recorder on the doctor's PC |
-| **API 2** | Patient information | Immediately after the recording starts | The AIMS LAB backend |
+| **API 2** | Patient information | **At the same moment as API 1** | The AIMS LAB backend |
 | **API 3** | Prescription built | The doctor builds the prescription | Both — see §5 |
 
 That is the entire integration. Everything else in this document explains those
@@ -119,14 +119,15 @@ two unrelated sets and cannot be put back together afterwards.
   "data": { "session_id": "01JB8XQ4M7YZ2K9V3N5P6R8T0W" } }
 ```
 
-Keep `session_id`. It identifies this consultation, and you send it back with
-API 2 and API 3.
+Keep `session_id` in the page. You send it back with the arm signal in §6a.
+Your server does not need it — see §5.
 
 ---
 
-## 5. API 2 — Patient information (right after the recording starts)
+## 5. API 2 — Patient information (at the same moment as API 1)
 
-**When:** as soon as the recording has started.
+**When:** the moment the doctor opens the patient's details — at the same time
+as your page sends API 1. Do not wait for the recording to start.
 **Where:** Channel B, server to server.
 
 Before the patient enters the doctor's room, a paramedic records their details
@@ -142,8 +143,11 @@ X-CMED-Key: <the key we issue to you>
 
 ```json
 {
-  "session_id":  "01JB8XQ4M7YZ2K9V3N5P6R8T0W",
   "patient_id":  "P0012345",
+  "doctor_id":   "DR0042",
+  "hospital_id": "CMED-DHK-BANANI-01",
+  "start_time":  "2026-09-10T10:14:32+06:00",
+  "date":        "2026-09-10",
   "demographics": {
     "name": "…", "sex": "female", "age_years": 34,
     "phone": "…", "address": "…"
@@ -170,6 +174,13 @@ receive a field we do not yet use than discover later that it was never sent.
 
 The fields required differ between male and female patients. Send what applies;
 our database enforces the right rules for each.
+
+**The five fields at the top must be exactly the same as in API 1** — the same
+patient, doctor, hospital, date, and the same `start_time` character for
+character. Create `start_time` once, on your server, and use that one value in
+both messages. This is how we connect the patient information to the right
+recording, and how we confirm the recording is genuine (§9). No `session_id` is
+needed.
 
 ---
 
@@ -198,8 +209,11 @@ X-CMED-Key: <your key>
 
 ```json
 {
-  "session_id":  "01JB8XQ4M7YZ2K9V3N5P6R8T0W",
   "patient_id":  "P0012345",
+  "doctor_id":   "DR0042",
+  "hospital_id": "CMED-DHK-BANANI-01",
+  "start_time":  "2026-09-10T10:14:32+06:00",
+  "date":        "2026-09-10",
   "issued_at":   "2026-09-10T10:26:11+06:00",
   "diagnoses":   ["…"],
   "items": [
@@ -212,6 +226,10 @@ X-CMED-Key: <your key>
   "notes": "…"
 }
 ```
+
+The five fields at the top are the same five as in API 1 and API 2, with the
+consultation's original `start_time` — not the time the prescription was issued.
+That is how the prescription attaches to the right consultation.
 
 Send `items` as a list, one entry per prescribed medicine, rather than as one
 block of text. We store each field in its own column, and a list we have to take
@@ -296,10 +314,43 @@ the second, any web page the doctor happened to open could start a recording on 
 registered machine. With it, even someone who obtained CMED access could not
 start or intercept a recording.
 
-**One thing we need from you for this to work:** the exact web address your page
+**One thing we need from you:** the exact web address your page
 is served from — scheme, host and port, for both production and testing. We put
 it on an allowlist, and a connection from anywhere else is refused before it is
 even accepted.
+
+### 9a. Every recording is confirmed by your server
+
+![fig](cmed_fig_confirm.svg)
+
+**Figure 4 | Two messages, two routes, one match.** When the doctor opens a
+patient, your page sends API 1 to the recorder and your server sends API 2 to us.
+Both carry the same five fields. Our server confirms the recording only if the
+two match.
+
+When the recorder asks our server for permission, our server looks for the
+patient information your server sent (API 2) with the same hospital, doctor,
+patient, date and `start_time`. The hospital must also be the clinic this PC is
+registered to.
+
+A fake web page on the doctor's PC could reach the recorder, but it cannot make
+your server send us a matching API 2. So its recording is never confirmed.
+
+The microphone does not wait for this check. It opens straight away, and the
+check runs alongside it.
+
+| Situation | What happens |
+|---|---|
+| API 2 arrives within a second or two | Confirmed. Nobody notices anything. |
+| API 2 is late | Recording keeps running. The recorder asks again every few seconds and is confirmed once API 2 arrives. |
+| API 2 never arrives | Recording is **not** cut. It is uploaded but marked *unconfirmed*, kept out of the dataset, and we are alerted. If API 2 arrives later it is admitted; if not, it is deleted from our server after 24 hours. |
+| The doctor opens a patient just to look | Your API 2 arrives but no recording asks for it. It expires after a few minutes. No harm. |
+| The doctor opens the same patient twice | We match the most recent unused API 2. |
+
+**What this asks of you.** Nothing beyond what you already send: API 2 at the
+moment the patient is opened, with the same five fields as API 1. That timing is
+the whole requirement. If API 2 is sent late as a matter of routine, recordings
+will sit unconfirmed until it arrives.
 
 ---
 
@@ -326,7 +377,7 @@ verified copy. It never travels to CMED.
 | 4 | Open the local connection from your page and keep it open | half a day |
 | 5 | Send API 1 when the doctor opens patient details | half a day |
 | 6 | Send API 3 when the prescription is built | quarter of a day |
-| 7 | Send API 2 and the prescription from your backend | one day |
+| 7 | Send API 2 from your backend **at the moment the patient is opened**, and the prescription when it is built, both with the same five fields as API 1 | one day |
 | 8 | Handle the replies by `code`; ignore failures quietly | half a day |
 | 9 | Joint testing with us | one day |
 | | **Total** | **3–4 developer-days** |

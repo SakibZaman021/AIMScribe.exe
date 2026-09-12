@@ -7,7 +7,7 @@
 | | |
 |---|---|
 | Document | AIMS-SRS-001 |
-| Version | 2.1 |
+| Version | 2.2 |
 | Date | 9 September 2026 |
 | Status | Baseline for integration. Items marked **OD-nn** are open and need a decision. |
 | Relationship to other documents | Complements `CMED_INTEGRATION_README.md` (narrative) with numbered, testable requirements. |
@@ -803,6 +803,88 @@ Against the dummy, recording-and-warning was the right behaviour. Against real
 CMED it is not. **OD-03** offers CMED the option of keeping warn-and-record for
 the pilot only.
 
+### 5.6 Confirming a trigger against CMED's server — `CNF`
+
+**The idea.** When a doctor opens a patient, two messages leave CMED at the same
+moment by two routes. The page sends the trigger to the recorder on the same PC
+(Channel A). CMED's server sends the patient information to the AIMS LAB server
+(Channel B). Both carry the same five fields. The AIMS LAB server confirms a
+recording only when the two match.
+
+![Figure 6 — Trigger confirmation](figures/cmed_fig_confirm.svg)
+
+**Figure 6.** Trigger confirmation. The page's trigger says *which laptop*. CMED's
+server notice says *this request is genuine*. The recorder's permission request
+is matched against the notice on hospital, doctor, patient, date and start time.
+
+**Why it is needed.** The origin allowlist (§6.1.2) stops a page served from the
+wrong address. It cannot stop a page that has found a way past it. A matching
+notice can only come from CMED's server, which authenticates its own doctors. A
+page on the laptop can reach the recorder; it cannot make CMED's server send us
+a notice. So a request with no notice is not trusted.
+
+**Why the trigger still goes to the PC.** The AIMS LAB server does not know which
+laptop a doctor is using, because rooms are shared across shifts. The page is
+running on that laptop, so the trigger lands on the right machine without any
+mapping. The trigger says where; the notice says whether.
+
+**Why the match is exact.** CMED creates `start_time` once, on its server, and the
+same value goes into both messages. Clock differences between the laptop and the
+servers therefore do not affect the match.
+
+> **`SRS-CNF-01`** [M, T, CMED] CMED's server shall send the patient-information
+> notice at the moment the patient is opened, at the same time as the page sends
+> the trigger. It shall not wait for the recording to start.
+>
+> **`SRS-CNF-02`** [M, T, Joint] The notice and the trigger shall carry identical
+> `patient_id`, `doctor_id`, `hospital_id`, `start_time` and `date`.
+> `start_time` shall be generated once by CMED's server and reused, never
+> generated separately by the page.
+>
+> **`SRS-CNF-03`** [M, T, AIMS] The AIMS LAB server shall hold each notice for
+> five minutes. A notice not claimed within that time shall expire, and expiry
+> shall not be treated as an error.
+>
+> **`SRS-CNF-04`** [M, T, AIMS] A permission request shall be granted only when an
+> unused notice matches it on all five fields, and the notice's hospital matches
+> the enrolled clinic of the requesting device. A notice shall match at most one
+> request.
+>
+> **`SRS-CNF-05`** [M, T, AIMS] Where more than one unused notice matches, the
+> most recent shall be used.
+>
+> **`SRS-CNF-06`** [M, T, AIMS] The microphone shall not wait for confirmation.
+> Capture begins on the trigger; confirmation runs alongside it (`SRS-GRT-07`).
+>
+> **`SRS-CNF-07`** [M, T, AIMS] If no notice matches, the recorder shall ask again
+> every five seconds and show "confirming" on the overlay. It shall not show an
+> error to the doctor.
+>
+> **`SRS-CNF-08`** [M, T, AIMS] If no notice has matched after two minutes, the
+> recording shall continue and be marked **unconfirmed**. It shall be uploaded as
+> usual, kept out of the dataset, and an alert raised. It shall never be cut
+> because a notice is late.
+>
+> **`SRS-CNF-09`** [M, T, AIMS] A notice arriving after a recording was marked
+> unconfirmed shall still be matched, and the recording admitted. An unconfirmed
+> recording that no notice matches within 24 hours shall be deleted from the
+> server and the deletion recorded in the audit log.
+>
+> **`SRS-CNF-10`** [M, T, AIMS] The match shall link the recording to its clinical
+> record. The prescription sent later shall attach to the same consultation using
+> the same five fields.
+
+**What this replaces.** `SRS-GRT-08` said audio captured under a failed
+authorisation is discarded. That still holds for a hard failure — a device that
+is not enrolled, or a clinic mismatch. A *missing notice* is handled by
+`SRS-CNF-08` and `SRS-CNF-09` instead, because a notice that is merely late
+usually means CMED's server was slow, not that the request was fake.
+
+**A useful side effect.** Because the match links each recording to its patient
+information at the moment it starts, most of the nightly reconciliation in §8.6
+becomes a check that nothing slipped through, rather than the main way records
+and recordings are joined.
+
 ---
 
 # Part III — Requirements
@@ -1228,9 +1310,9 @@ eliminate it.
 
 ### 7.4 Integrity — `CHN`
 
-![Figure 6 — Chain of custody](figures/fig3_chain_of_custody.svg)
+![Figure 7 — Chain of custody](figures/fig3_chain_of_custody.svg)
 
-**Figure 6.** Chain of custody. Each session carries an Ed25519-signed hash chain
+**Figure 7.** Chain of custody. Each session carries an Ed25519-signed hash chain
 whose entries link by the previous entry's digest, so omission, reordering or
 edit is detectable. A sealed segment is encrypted on the PC, uploaded, then read
 back and re-hashed by the server before acceptance. The archived WAV is
@@ -1454,9 +1536,9 @@ warning and no way to know it happened.
 **The solution.** A new trigger does not end the current session until the
 current session's prescription has been built.
 
-![Figure 7 — The consultation gate](figures/fig7_consultation_gate.svg)
+![Figure 8 — The consultation gate](figures/fig7_consultation_gate.svg)
 
-**Figure 7.** The consultation gate. A session begins un-armed; a stray trigger is refused and the recording continues. Only the prescription-built flag arms the gate, after which the next trigger hands over with no gap in capture.
+**Figure 8.** The consultation gate. A session begins un-armed; a stray trigger is refused and the recording continues. Only the prescription-built flag arms the gate, after which the next trigger hands over with no gap in capture.
 
 | ID | Requirement | Pri | Ver | Owner |
 |---|---|---|---|---|
@@ -1684,24 +1766,27 @@ reconciled by keeping two renditions.
 
 ### 8.6 Clinical record ingestion — `CRI`
 
-The record is required at two distinct moments, and the interface already has a
-signal at each of them. Nothing new is added to the transport.
+The record is needed at two moments. Both travel server to server on Channel B
+(§3.3a). The trigger and the arm signal on Channel A carry no clinical data.
 
-| Moment | Existing signal | What CMED sends | Why then |
-|---|---|---|---|
-| Consultation begins | `start` (the trigger) | Demographics captured at reception; for a returning patient, the most recent previous prescription in full | The clinician needs the history at the start; a record delivered afterwards cannot inform the encounter it describes |
-| Consultation concludes | `consultation_complete` | Prescription contents, diagnoses, notes, investigations | These do not exist until the prescription is built — which is the event that already arms the gate |
+| Moment | What CMED's server sends | Why then |
+|---|---|---|
+| Patient opened | Patient information: demographics, paramedic observations and notes, and for a returning patient the most recent previous prescription | The doctor needs the history at the start. It also confirms the recording (§5.6). |
+| Prescription built | Prescription contents, diagnoses, notes, investigations | These do not exist until the prescription is built — the same moment the recording is armed |
 
-> **`SRS-CRI-01`** [M, T, CMED] The trigger shall carry a `demographics` object
-> holding the data captured before the patient entered the consulting room.
+> **`SRS-CRI-01`** [M, T, CMED] Patient information shall be sent by CMED's server
+> to the AIMS LAB server at the moment the patient is opened, carrying the five
+> trigger fields and a `demographics` object with the data captured before the
+> patient entered the room.
 >
-> **`SRS-CRI-02`** [M, T, CMED] For a patient with a prior encounter, the trigger
-> shall additionally carry `previous_prescription`: the complete contents of the
-> most recent one, with its date.
+> **`SRS-CRI-02`** [M, T, CMED] For a patient with a prior encounter, the patient
+> information shall also carry `previous_visit`: the complete contents of the most
+> recent prescription, with its date.
 >
-> **`SRS-CRI-03`** [M, T, CMED] `consultation_complete` shall carry the
-> prescription contents, diagnoses, clinical notes and investigation orders for
-> the encounter just concluded.
+> **`SRS-CRI-03`** [M, T, CMED] When the prescription is built, CMED's server shall
+> send its contents, diagnoses, notes and investigation orders, carrying the same
+> five fields as the trigger, including the consultation's original
+> `start_time`.
 >
 > **`SRS-CRI-04`** [M, T, AIMS] Ingestion shall never block acquisition. A record
 > that is absent, late, malformed or rejected shall be logged and reconciled
@@ -1738,11 +1823,10 @@ signal at each of them. Nothing new is added to the transport.
 > **`SRS-CRI-12`** [M, I, AIMS] Records shall be encrypted at rest and shall not
 > be transmitted to any downstream service that does not require them.
 
-**Reconciliation is the requirement to take seriously.** Audio arrives over a
-buffered path that survives a brief interruption; the record arrives over a live
-browser channel that does not. The two will therefore diverge occasionally, and a
-nightly reconciliation is the only way that divergence becomes visible rather
-than accumulating.
+**Reconciliation is now a safety net.** Most records are linked to their
+recordings at the moment of confirmation (`SRS-CNF-10`). The nightly check in
+`SRS-CRI-10` finds what that missed — a prescription that never arrived, or a
+recording that stayed unconfirmed.
 
 ### 8.7 Database architecture — `DBA`
 
@@ -2236,6 +2320,13 @@ Each test is pass/fail on a running system, with the requirements it verifies.
 | `AT-54` | Insert a female-only field for a male patient, and omit a required one | DBA-06 | Rejected by a database constraint, not by application code |
 | `AT-55` | Query recordings for one clinic, clinician and date | DBA-02, DSH-02 | Served by index; recording located without a filesystem search |
 | `AT-56` | Open the dashboard as an operations role | DSH-06 | Volumes, integrity and reconciliation visible; no patient name or clinical content reachable |
+| `AT-57` | Send the trigger and a matching notice together | CNF-02, CNF-04 | Recording confirmed and linked to its patient information |
+| `AT-58` | Trigger the recorder from a page with no notice sent | CNF-04, CNF-08 | Recording continues, is marked unconfirmed after two minutes, alert raised, kept out of the dataset |
+| `AT-59` | Send the notice 30 seconds after the trigger | CNF-06, CNF-07 | Microphone open from the start; overlay shows "confirming"; confirmed when the notice lands |
+| `AT-60` | Send the notice an hour after a recording was marked unconfirmed | CNF-09 | Recording admitted |
+| `AT-61` | Send a notice and never trigger | CNF-03 | Notice expires after five minutes; no error |
+| `AT-62` | Send a notice whose `start_time` differs from the trigger by one second | CNF-02 | No match — confirms both messages must use the single server-generated value |
+| `AT-63` | Send a notice for a hospital other than the device's clinic | CNF-04 | No match |
 | `AT-30` | Deploy the backend during an active recording | NFR-03 | No interruption; no lost segment |
 | `AT-31` | Send a 128 KB frame | IF1 transport | Refused, connection preserved |
 | `AT-32` | Send a message with an unknown extra field | NFM-05 | Ignored; command succeeds |
@@ -2597,6 +2688,7 @@ their entire integration is the WebSocket, which Postman is the wrong tool for.
 | `SES` / `GAT` / `UIX` | Sessions, gate, overlay | 7.6–7.8 |
 | `BKD` / `ARC` | Backend and archive worker | 7.9–7.10 |
 | `DAT` | Data | 8.1–8.5 |
+| `CNF` | Trigger confirmation | 5.6 |
 | `CRI` | Clinical record ingestion | 8.6 |
 | `DBA` | Database architecture | 8.7 |
 | `DSH` | Operational dashboard | 8.8 |
@@ -2607,6 +2699,7 @@ their entire integration is the WebSocket, which Postman is the wrong tool for.
 | Version | Date | Change |
 |---|---|---|
 | 1.0 | 25 August 2026 | First baseline for the CMED integration meeting |
+| 2.2 | 12 September 2026 | §5.6 trigger confirmation (`SRS-CNF-01`–`10`): the trigger stays on the PC, and each recording is confirmed by matching it against the patient-information notice CMED's server sends at the same moment. §8.6 corrected — it still said clinical data rode the trigger, which stopped being true when Channel B was added. Tests `AT-57`–`AT-63`. |
 | 2.1 | 11 September 2026 | Why audio is still found on workstations, traced in code: delivery works, deletion does not complete. A receipt is issued only after archiving, and was then followed by a 24-hour grace the agent had to be running to outlive — on a machine switched off after clinic. `SRS-REC-15`–`18` move the receipt to custody rather than archiving, remove the grace, and sweep at startup and shutdown. `SRS-SPL-08` amended. |
 | 2.0 | 10 September 2026 | Readability pass: §1.7 added as a plain-language reading guide and glossary, and the longest passages rewritten as shorter sentences. Channel B documented (§3.3a) — CMED sends clinical data directly to the AIMS LAB backend, which reverses the earlier claim that no such path existed. §7.3 rewritten around the rule that nothing is stored on the doctor's PC. |
 | 1.8 | 10 September 2026 | The local buffer is a shock absorber, not an offline-first store: clinic sites are networked, so it is sized for minutes (4 GB) and anything undelivered after fifteen minutes is a fault. The recording catalogue and the clinical record are two separate databases with separate credentials, joined on `patient_id` only. |
