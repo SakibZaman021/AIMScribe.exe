@@ -29,13 +29,14 @@ FIG1_CAP = ("**Figure 1 | Architecture block diagram.** Boundaries of the "
             "travels only from the workstation to the backend, and never towards the "
             "EHR node.")
 
-FIG2_CAP = ("**Figure 2 | Sequence of the acquisition pathway.** Selection of patient "
-            "details dispatches a trigger to the local daemon. Acquisition begins "
-            "immediately while authorisation is validated by the backend in parallel, "
-            "so that network latency cannot displace the opening of the encounter. "
+FIG2_CAP = ("**Figure 2 | Sequence of the acquisition pathway.** Opening a "
+            "patient sends two messages at once: a trigger to the local daemon "
+            "(1a) and a corroborating notice from the EHR server to the backend "
+            "(1b). Acquisition begins immediately, and the backend authorises the "
+            "recording only if the daemon's request matches the notice exactly. "
             "Segments are sealed, uploaded and verified by server-side re-hashing "
-            "throughout. Local material is released for deletion only against a purge "
-            "receipt confirming that a verified archival copy exists.")
+            "throughout. Local material is deleted as soon as a purge receipt "
+            "confirms that a verified copy exists.")
 
 
 def prepare() -> str:

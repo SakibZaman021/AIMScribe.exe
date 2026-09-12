@@ -18,19 +18,20 @@ from the path, at a sustained 88.2 kB s⁻¹.
 The interoperability layer is agnostic to the partner record system. Rather
 than requiring each vendor to integrate with a remote service, it is exposed
 as a loopback interface on the clinician's workstation, addressed by a small
-quantity of JavaScript within the existing EHR page. One contract is therefore implemented identically for the three partner
-systems in the deployment — CMED, Aalo and Amader Susastho — none of which
-holds cryptographic material, stores audio, or alters its server
-infrastructure. Two channels are used, and the separation is deliberate. Control signals reach
-the daemon on the clinician's own machine and never leave it, because they
-must take effect the moment a patient is opened. Clinical data travels server
-to server to the research backend, so no sensitive content passes through a
-browser. Audio travels towards the partner system on neither channel.
+quantity of JavaScript within the existing EHR page. One contract is therefore
+implemented identically for the three partner systems in the deployment —
+CMED, Aalo and Amader Susastho — none of which holds cryptographic material,
+stores audio, or alters its server infrastructure. Two channels are used, and
+the separation is deliberate. Control signals reach the daemon on the
+clinician's own machine and never leave it, because they must take effect the
+moment a patient is opened. Clinical data travels server to server to the
+research backend, so no sensitive content passes through a browser. Audio
+travels towards the partner system on neither channel.
 
-[Insert Figure X: Architecture block diagram delineating the trust boundaries
-between the local workstation, the partner EHR node and the AIMS Lab backend,
-and showing that the integration surface is confined to a loopback channel on
-the clinician's own machine.]
+[Insert Figure X: Architecture block diagram delineating the local
+workstation, the partner EHR node and the AIMS Lab backend, with the loopback
+control channel, the server-to-server clinical channel, and the encrypted
+audio path.]
 
 ### Zero-Touch Trigger Mechanism and Acoustic Pre-processing
 
@@ -68,22 +69,23 @@ acquisition path was consequently treated as a measured commissioning
 requirement rather than a procurement detail.
 
 [Insert Figure Y: UML sequence diagram of the trigger-to-upload flow, from the
-EHR interface event through parallel authorisation, segment sealing,
-server-side verification and purge receipt, to archival.]
+EHR interface event and its corroborating notice, through parallel
+authorisation, segment sealing and server-side verification, to the purge
+receipt.]
 
 ### Network Fault Tolerance and Edge Caching
 
 Connectivity across the study sites is intermittent, and the acquisition path
 was therefore made offline-first rather than offline-tolerant. Each sealed
-segment is encrypted under AES-256-GCM and committed to a local spool before
+segment is encrypted under AES-256-GCM and committed to a local buffer before
 transmission is attempted. Every state transition is appended to a
 synchronously flushed journal, so that abrupt power loss cannot render a
-partial segment indistinguishable from a complete one. The spool is
-provisioned at 40 GB — approximately 135 recorded hours, or three weeks of a
-room's activity without connectivity. Synchronisation is opportunistic: when
-bandwidth returns, queued segments are transmitted in chain order by a
-background loop decoupled from acquisition, so that drainage of an accumulated
-backlog does not perturb the consultation in progress.
+partial segment indistinguishable from a complete one. The buffer is sized for
+interruptions of minutes rather than days, and nothing is retained on the
+workstation once the server confirms a verified copy. Synchronisation is
+opportunistic: when bandwidth returns, queued segments are transmitted in
+chain order by a background loop decoupled from acquisition, so that drainage
+of an accumulated backlog does not perturb the consultation in progress.
 
 ### Deterministic Data Labelling and Synchronisation
 
@@ -105,29 +107,43 @@ observed in pilot operation, and not recoverable afterwards.
 ### Device Binding and Cryptographic Security
 
 Access to the acquisition path is constrained by hardware-anchored
-authentication. Each workstation is commissioned once by an administrator, using a single-use
-activation credential. That credential is exchanged for a device identity and
-an asymmetric key pair generated on, and never leaving, that machine. The
-backend retains the credential only as a cryptographic digest. Binding is
-between workstation and research backend, and is therefore independent of the
-partner record system.
+authentication. Each workstation is commissioned once by an administrator,
+using a single-use activation credential. That credential is exchanged for a
+device identity and an asymmetric key pair generated on, and never leaving,
+that machine. The backend retains the credential only as a cryptographic
+digest. Binding is between workstation and research backend, and is therefore
+independent of the partner record system.
 
 Registration establishes that a machine may record at all; a separate
 authorisation — short-lived, single-use, issued per encounter and verified
 against a pinned public key — establishes that a particular request is
 legitimate. The two controls are deliberately distinct: an enrolled
 workstation without the second would record for any page loaded in the
-clinician's browser. Compromise of EHR access alone therefore confers no
-capability to initiate or intercept acquisition.
+clinician's browser.
+
+Authorisation is in turn conditioned on corroboration from the record system.
+When a patient is opened, the EHR server sends the same encounter identifiers
+— patient, clinician, facility, date and start time — directly to the research
+backend, while the page signals the daemon. A request to record is authorised
+only if it matches such a notice exactly. The start time is generated once by
+the EHR server and carried in both messages, so the match is unaffected by
+clock drift between workstation and servers. A page running on the workstation
+can reach the daemon but cannot cause the EHR server to issue a notice, so a
+spurious trigger is never admitted to the corpus. Corroboration does not gate
+acquisition: a recording whose notice is late continues, is held back as
+unconfirmed, and is admitted when the notice arrives or discarded after 24
+hours. The same match links each recording to its structured clinical record
+from the moment acquisition begins.
 
 Integrity is maintained end-to-end by a per-session hash chain. Each entry —
 session opening, every segment, every interruption, and closure — embeds the
 digest of its predecessor and is signed by the device key, rendering deletion,
 reordering and substitution detectable. Segments are verified on arrival by
 re-reading the stored object and recomputing its digest server-side. Local
-material is released for deletion only against a signed purge receipt
-attesting that a verified archival copy exists; any discrepancy quarantines
-the session, withholds the receipt and preserves both copies. A continuous
-chain of custody is thereby maintained from acquisition to archive, under
-which tampering, silent truncation and corruption at rest are detectable
-rather than merely improbable.
+material is deleted as soon as a signed receipt attests that a verified
+server-side copy exists. A segment that fails verification is still delivered,
+to a quarantine area outside the evidence archive, so that no recording is
+left on the workstation or lost from the corpus. A continuous chain of custody
+is thereby maintained from acquisition to archive, under which tampering,
+silent truncation and corruption at rest are detectable rather than merely
+improbable.
