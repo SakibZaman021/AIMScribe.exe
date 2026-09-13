@@ -52,7 +52,7 @@ f.rect(20, 594, 565, 258, rx=8, sw=1.3, dash="5 4", op="0.55")
 f.text(20, 586, "AIMS LAB BACKEND", size=11, bold=True)
 f.box(36, 620, 250, 52, [("API", 11, True), ("authorisation · verification", 9)])
 f.box(318, 620, 250, 52, [("Clinical store", 11, True), ("prescriptions · notes", 9)])
-f.box(36, 700, 250, 52, [("Object store", 11, True), ("sealed segments", 9)])
+f.box(36, 700, 250, 52, [("Object store", 11, True), ("segments, then merged FLAC copy", 9)])
 f.box(318, 700, 250, 52, [("Archive", 11, True), ("verified recordings", 9)])
 f.box(36, 780, 532, 46, [("Server-side verification", 10.5, True),
                          ("every segment re-read and re-hashed before acceptance", 8.5)])

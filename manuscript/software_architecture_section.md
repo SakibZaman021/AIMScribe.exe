@@ -142,8 +142,13 @@ reordering and substitution detectable. Segments are verified on arrival by
 re-reading the stored object and recomputing its digest server-side. Local
 material is deleted as soon as a signed receipt attests that a verified
 server-side copy exists. A segment that fails verification is still delivered,
-to a quarantine area outside the evidence archive, so that no recording is
-left on the workstation or lost from the corpus. A continuous chain of custody
-is thereby maintained from acquisition to archive, under which tampering,
-silent truncation and corruption at rest are detectable rather than merely
-improbable.
+to a quarantine area outside the evidence archive, so that no recording is left
+on the workstation or lost from the corpus. Segment objects remain in object
+storage until the consultation has been merged into the archive and verified
+against its chain. The merged recording is then compressed losslessly,
+confirmed to decode to samples identical to the archive, encrypted and retained
+in object storage as an off-site copy; only once that copy has been verified
+are the segment objects deleted. A continuous
+chain of custody is thereby maintained from acquisition to archive, under
+which tampering, silent truncation and corruption at rest are detectable
+rather than merely improbable.

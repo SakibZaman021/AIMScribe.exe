@@ -7,7 +7,7 @@
 | | |
 |---|---|
 | Document | AIMS-SRS-001 |
-| Version | 2.2 |
+| Version | 2.3 |
 | Date | 9 September 2026 |
 | Status | Baseline for integration. Items marked **OD-nn** are open and need a decision. |
 | Relationship to other documents | Complements `CMED_INTEGRATION_README.md` (narrative) with numbered, testable requirements. |
@@ -1624,6 +1624,24 @@ archive tree.
 | `SRS-ARC-05` | It shall issue purge receipts only after the archive copy is verified. | M | T | AIMS |
 | `SRS-ARC-06` | It shall poll on a bounded interval with a bounded batch, and shall degrade gracefully when the backend is unreachable. | M | T | AIMS |
 | `SRS-ARC-07` | The archive volume shall be backed up, and the backup shall be restore-tested. | M | D | AIMS |
+| `SRS-ARC-08` | Segment objects in cloud storage shall not be deleted as soon as a session is archived. Each finished consultation shall first be kept in the cloud as one merged, losslessly compressed copy. | M | T | AIMS |
+| `SRS-ARC-09` | The steps shall run in this order, and each shall succeed before the next begins: (1) the merged WAV is written to the UIU archive and verified against the hash chain; (2) it is compressed to FLAC; (3) the FLAC is decoded and confirmed to contain samples identical to the archived WAV; (4) it is encrypted and uploaded; (5) the upload is downloaded again and confirmed complete; (6) the cloud copy is recorded in the recordings database; (7) only then are the segment objects deleted. | M | T | AIMS |
+| `SRS-ARC-10` | If any step fails, the segment objects shall be kept and the step retried. Repeated failure shall raise an alert. No step shall be skipped to free space. | M | T | AIMS |
+| `SRS-ARC-11` | The compressed copy shall be lossless (FLAC). A lossy codec shall not be used for it, because a lossy copy cannot rebuild the archive or be checked against the hash chain. | M | I | AIMS |
+| `SRS-ARC-12` | Segment objects and merged copies shall be held in separate buckets. The merged-copy bucket shall carry a deletion lock; the segment bucket shall not, so that clean-up can run. The key that deletes segments shall have no access to the merged-copy bucket. | M | I | AIMS |
+
+**Why the order matters.** Segments are deleted only after two things are proven:
+the UIU server holds the recording and it checks out against the chain, and the
+cloud holds a lossless copy that decodes to the same samples. At every moment
+before step 7, at least two complete copies of the audio exist. A failure part
+way through therefore costs time, never audio.
+
+**Why merging happens on the UIU server.** Cloud storage stores files; it does
+not run the program that joins and compresses audio. The UIU server has already
+joined the segments to build the archive WAV, so it compresses that same file.
+Measured on 48 archived recordings, FLAC reduced them to 16% of their WAV size and
+decoded back to identical samples in every case (planning figure 45%, because
+today's recordings contain gated silence that compresses unusually well).
 
 ---
 
@@ -1710,7 +1728,8 @@ new files. Three consequences follow and are specified rather than assumed:
 | Data | Location | Retention |
 |---|---|---|
 | Buffered encrypted segments | Consulting-room PC | Until the receipt, then deleted immediately |
-| Segment objects | Object storage | Until archived and verified |
+| Segment objects | Object storage, segment bucket | Until the recording is archived and verified at UIU **and** its FLAC copy is verified in the cloud (`SRS-ARC-09`), then deleted |
+| Merged FLAC copy | Object storage, locked bucket | Kept, encrypted — **OD-06** |
 | Archived WAV | AIMS LAB archive volume | **OD-06 — undecided** |
 | Session metadata | Database | Indefinite |
 | Audit log | Database | Indefinite, append-only |
@@ -1724,7 +1743,9 @@ new files. Three consequences follow and are specified rather than assumed:
 
 > **`SRS-DAT-08`** [M, I, AIMS] Audio shall be encrypted at rest at every stage:
 > AES-256-GCM in the spool, server-side encryption in object storage, and
-> encrypted volumes in the archive.
+> encrypted volumes in the archive. The merged FLAC copy shall additionally be
+> encrypted on the UIU server before upload, with a key that never leaves UIU, so
+> the storage provider holds data it cannot read.
 >
 > **`SRS-DAT-09`** [M, I, AIMS] Audio shall be encrypted in transit at every
 > stage: TLS 1.2+ throughout.
@@ -1753,6 +1774,11 @@ reconciled by keeping two renditions.
 > **`SRS-DAT-12`** [M, T, AIMS] Any rendition prepared for speech recognition
 > shall be derived from the archived original, stored separately, and shall never
 > replace it or be hashed as evidence.
+>
+> **`SRS-DAT-17`** [M, T, AIMS] The merged FLAC copy in cloud storage is a backup
+> of the original, not a rendition. Because FLAC is lossless it decodes to samples
+> identical to the archived WAV, so it may be used to rebuild the archive. It
+> shall never be filtered, levelled or re-encoded.
 >
 > **`SRS-DAT-13`** [M, I, AIMS] The processing chain and its parameters shall be
 > versioned and recorded, so a transcript can be traced to exactly how its audio
@@ -2167,7 +2193,7 @@ defaults to leave alone.
 |---|---|---|
 | API | 2 × (1 vCPU, 2 GB RAM) | One handles the load. Two exist for zero-downtime deploys and for one failing. |
 | Database | Managed Postgres, 1–4 vCPU autoscaling, 100 GB, autosuspend **off** | Metadata is small; suspend adds cold-start latency to a clinical path |
-| Object storage | S3-compatible, no egress fees | Egress fees on 11 TB/year dominate every other cost |
+| Object storage | S3-compatible, no egress fees | Holds segments until merged (about 70 GB at any moment) and one merged FLAC copy per consultation (about 5 TB a year at the planning figure). Transcription reads audio back, so egress fees would dominate. |
 | Cache / queue | Redis, 256 MB | Rate limits, job coordination |
 | Estimated | **USD 120–200/month** | Excludes archive storage and the out-of-scope AI pipeline |
 
@@ -2249,7 +2275,7 @@ At every scale the first constraint is archive retention, not compute. This is
 | 13 | Power loss mid-segment | Journal on restart | Partial segment not accepted; ≤ 99 s of audio lost | Nothing | Bounded loss |
 | 14 | Flag never arrives | Gate stays un-armed | Session stays open; Stop button available | Overlay visible | Long session, `SRS-GAT-06` reporting |
 | 15 | Two triggers in rapid succession | Gate state | Second refused while un-armed; handover once armed | Nothing | **None** |
-| 16 | Archive worker down | Backlog growth | Segments retained; nothing purged without a receipt | Nothing | **None** — deferred |
+| 16 | Archive worker down | Backlog growth | Segments retained, locally and in the cloud; nothing purged without a receipt, and no cloud segment deleted before its merged copy is verified | Nothing | **None** — deferred |
 
 **Read column six.** In sixteen failure modes, the clinical impact is *none* in
 nine and *a lost recording* in the rest. In none of them does a doctor fail to
@@ -2327,6 +2353,10 @@ Each test is pass/fail on a running system, with the requirements it verifies.
 | `AT-61` | Send a notice and never trigger | CNF-03 | Notice expires after five minutes; no error |
 | `AT-62` | Send a notice whose `start_time` differs from the trigger by one second | CNF-02 | No match — confirms both messages must use the single server-generated value |
 | `AT-63` | Send a notice for a hospital other than the device's clinic | CNF-04 | No match |
+| `AT-64` | Archive one consultation end to end | ARC-08, ARC-09 | Merged WAV at UIU; FLAC copy in the locked bucket; segments deleted only after both verified |
+| `AT-65` | Stop the worker between the upload and the database record | ARC-09, ARC-10 | Segments still present; the step is retried and completes on restart |
+| `AT-66` | Corrupt the FLAC before its decode check | ARC-09, ARC-10 | Mismatch detected; segments kept; alert raised |
+| `AT-67` | Try to delete a merged copy using the segment clean-up key | ARC-12 | Refused |
 | `AT-30` | Deploy the backend during an active recording | NFR-03 | No interruption; no lost segment |
 | `AT-31` | Send a 128 KB frame | IF1 transport | Refused, connection preserved |
 | `AT-32` | Send a message with an unknown extra field | NFM-05 | Ignored; command succeeds |
@@ -2699,6 +2729,7 @@ their entire integration is the WebSocket, which Postman is the wrong tool for.
 | Version | Date | Change |
 |---|---|---|
 | 1.0 | 25 August 2026 | First baseline for the CMED integration meeting |
+| 2.3 | 13 September 2026 | Cloud segments are no longer simply deleted after archiving. `SRS-ARC-08`–`12`: the recording is stored and verified at UIU first, a merged lossless FLAC copy is then verified and kept in a locked cloud bucket, and only after that are the segments deleted. `SRS-DAT-17` distinguishes the FLAC copy (a backup) from the ASR rendition. Retention and sizing updated. Tests `AT-64`–`AT-67`. |
 | 2.2 | 12 September 2026 | §5.6 trigger confirmation (`SRS-CNF-01`–`10`): the trigger stays on the PC, and each recording is confirmed by matching it against the patient-information notice CMED's server sends at the same moment. §8.6 corrected — it still said clinical data rode the trigger, which stopped being true when Channel B was added. Tests `AT-57`–`AT-63`. |
 | 2.1 | 11 September 2026 | Why audio is still found on workstations, traced in code: delivery works, deletion does not complete. A receipt is issued only after archiving, and was then followed by a 24-hour grace the agent had to be running to outlive — on a machine switched off after clinic. `SRS-REC-15`–`18` move the receipt to custody rather than archiving, remove the grace, and sweep at startup and shutdown. `SRS-SPL-08` amended. |
 | 2.0 | 10 September 2026 | Readability pass: §1.7 added as a plain-language reading guide and glossary, and the longest passages rewritten as shorter sentences. Channel B documented (§3.3a) — CMED sends clinical data directly to the AIMS LAB backend, which reverses the earlier claim that no such path existed. §7.3 rewritten around the rule that nothing is stored on the doctor's PC. |
