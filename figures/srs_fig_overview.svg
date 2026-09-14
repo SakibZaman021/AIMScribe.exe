@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 690" color="#1a1a1a" role="img" aria-label="AIMScribe at a glance. The CMED page tells the recorder on the same PC when a consultation starts and when its prescription is built (Channel A). The CMED server sends patient information and prescriptions to the UIU server (Channel B). The recorder uploads audio pieces to Cloudflare R2. The UIU server reads them back, merges each consultation into a WAV and JSON on its archive, and stores a lossless FLAC copy in a locked R2 bucket. Audio never goes to CMED." font-family="Helvetica, Arial, sans-serif">
+<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker><marker id="arA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b3261e"/></marker></defs>
+<text x="24" y="26" font-size="12.5" font-weight="600" fill="currentColor">AIMScribe at a glance</text>
+<text x="24" y="42" font-size="9.5" fill="currentColor">Who sends what, and where the audio goes.</text>
+<rect x="24" y="70" width="300" height="170" rx="8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="5 4" opacity="0.55"/>
+<text x="24" y="64" font-size="10" font-weight="600" fill="currentColor">CONSULTING-ROOM PC</text>
+<rect x="44" y="86" width="260" height="44" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="174.0" y="104.86500000000001" font-size="10.5" font-weight="600" text-anchor="middle" fill="currentColor">CMED page in the browser</text>
+<text x="174.0" y="118.845" font-size="9" text-anchor="middle" fill="currentColor">sends API 1 and API 3 (arm)</text>
+<path d="M174,130 L174,170" fill="none" stroke="#b3261e" stroke-width="2" marker-end="url(#arA)"/>
+<text x="184" y="154" font-size="9" font-weight="600" fill="#b3261e">Channel A · same PC</text>
+<rect x="44" y="176" width="260" height="48" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="174.0" y="197.04" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor">aimscribe.exe</text>
+<text x="174.0" y="211.14" font-size="9" text-anchor="middle" fill="currentColor">records · encrypts · uploads · Stop/Pause</text>
+<rect x="416" y="86" width="220" height="56" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="526.0" y="104.23" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor">CMED server</text>
+<text x="526.0" y="118.33" font-size="9" text-anchor="middle" fill="currentColor">API 2 · patient information</text>
+<text x="526.0" y="131.95" font-size="9" text-anchor="middle" fill="currentColor">API 3 · prescription</text>
+<path d="M636,114 L660,114 L660,470 L642,470" fill="none" stroke="#b3261e" stroke-width="2" marker-end="url(#arA)"/>
+<text x="650" y="200" font-size="9.5" font-weight="600" text-anchor="end" fill="#b3261e">Channel B</text>
+<text x="650" y="214" font-size="9" text-anchor="end" fill="#b3261e">HTTPS + API key</text>
+<rect x="24" y="300" width="612" height="84" rx="8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="5 4" opacity="0.55"/>
+<text x="636" y="294" font-size="10" font-weight="600" text-anchor="end" fill="currentColor">CLOUDFLARE R2 · CLOUD STORAGE</text>
+<rect x="44" y="316" width="270" height="52" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="179.0" y="338.865" font-size="10.5" font-weight="600" text-anchor="middle" fill="currentColor">Segment bucket</text>
+<text x="179.0" y="352.84499999999997" font-size="9" text-anchor="middle" fill="currentColor">audio pieces · deleted after merge and copy</text>
+<rect x="346" y="316" width="270" height="52" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="481.0" y="338.865" font-size="10.5" font-weight="600" text-anchor="middle" fill="#b3261e">Copy bucket · locked</text>
+<text x="481.0" y="352.84499999999997" font-size="9" text-anchor="middle" fill="currentColor">one lossless FLAC per consultation, kept</text>
+<path d="M114,224 L114,310" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<text x="124" y="272" font-size="9" fill="currentColor">audio pieces</text>
+<path d="M304,200 L330,200 L330,444" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<text x="338" y="272" font-size="9" fill="currentColor">requests</text>
+<path d="M290,368 L290,444" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<text x="282" y="412" font-size="9" text-anchor="end" fill="currentColor">read back · check · merge</text>
+<path d="M500,448 L500,374" fill="none" stroke="#b3261e" stroke-width="2" marker-end="url(#arA)"/>
+<text x="510" y="412" font-size="9" fill="#b3261e">FLAC copy</text>
+<rect x="24" y="450" width="612" height="176" rx="8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-dasharray="5 4" opacity="0.55"/>
+<text x="24" y="444" font-size="10" font-weight="600" fill="currentColor">UIU SERVER</text>
+<rect x="44" y="468" width="176" height="52" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="132.0" y="491.03999999999996" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor">PostgreSQL</text>
+<text x="132.0" y="505.13999999999993" font-size="9" text-anchor="middle" fill="currentColor">aims_recordings · aims_clinical</text>
+<rect x="242" y="468" width="176" height="52" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="330.0" y="491.03999999999996" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor">API</text>
+<text x="330.0" y="505.13999999999993" font-size="9" text-anchor="middle" fill="currentColor">authorise · confirm · verify</text>
+<rect x="440" y="468" width="176" height="52" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="528.0" y="490.865" font-size="10.5" font-weight="600" text-anchor="middle" fill="currentColor">Clinical intake</text>
+<text x="528.0" y="504.84499999999997" font-size="9" text-anchor="middle" fill="currentColor">patient information · prescriptions</text>
+<rect x="44" y="546" width="176" height="52" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="132.0" y="568.865" font-size="10.5" font-weight="600" text-anchor="middle" fill="currentColor">Archive worker</text>
+<text x="132.0" y="582.845" font-size="9" text-anchor="middle" fill="currentColor">merge pieces · check chain</text>
+<rect x="242" y="546" width="176" height="52" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="330.0" y="568.865" font-size="10.5" font-weight="600" text-anchor="middle" fill="currentColor">Archive array</text>
+<text x="330.0" y="582.845" font-size="9" text-anchor="middle" fill="currentColor">WAV + JSON, same name</text>
+<rect x="440" y="546" width="176" height="52" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="528.0" y="568.865" font-size="10.5" font-weight="600" text-anchor="middle" fill="currentColor">Cloud-copy worker</text>
+<text x="528.0" y="582.845" font-size="9" text-anchor="middle" fill="currentColor">FLAC · check · encrypt · upload</text>
+<path d="M220,572 L236,572" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<path d="M418,572 L434,572" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<text x="24" y="656" font-size="9.5" fill="currentColor">Audio travels only from the PC to Cloudflare R2 and the UIU server. It is never sent to CMED.</text>
+<text x="24" y="672" font-size="9.5" fill="currentColor">Each copy is deleted only after the next place has proved it holds a good copy (Figure 6).</text>
+</svg>

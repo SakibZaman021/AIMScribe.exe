@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 552" color="#1a1a1a" role="img" aria-label="Where the audio is, step by step. One: an encrypted piece in the buffer on the doctor's PC, deleted as soon as the server issues a receipt. Two: the piece in the Cloudflare R2 segment bucket, deleted only after steps four and five are verified. Three: the UIU server reads the piece back and checks it. Four: the UIU archive holds one WAV and one JSON per consultation. Five: a lossless, encrypted FLAC copy is kept in a locked R2 bucket." font-family="Helvetica, Arial, sans-serif">
+<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker><marker id="arA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b3261e"/></marker></defs>
+<text x="24" y="26" font-size="12.5" font-weight="600" fill="currentColor">Where the audio is, step by step</text>
+<text x="24" y="42" font-size="9.5" fill="currentColor">Each copy is deleted only after the next place has proved it holds a good copy.</text>
+<text x="24" y="64" font-size="9.5" font-weight="600" fill="currentColor">WHERE THE AUDIO IS</text>
+<text x="356" y="64" font-size="9.5" font-weight="600" fill="currentColor">WHEN THIS COPY IS DELETED</text>
+<rect x="24" y="76" width="300" height="56" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="174.0" y="101.04" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor">1 · On the doctor's PC</text>
+<text x="174.0" y="115.14" font-size="9" text-anchor="middle" fill="currentColor">encrypted piece in the buffer (AES-256-GCM)</text>
+<text x="356" y="100" font-size="9.5" fill="#b3261e">Immediately, when the server issues a</text>
+<text x="356" y="114" font-size="9.5" fill="#b3261e">receipt for a verified copy.</text>
+<path d="M174,132 L174,160" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<text x="184" y="153" font-size="9" fill="currentColor">upload</text>
+<rect x="24" y="166" width="300" height="56" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="174.0" y="191.04" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor">2 · Cloudflare R2 · segment bucket</text>
+<text x="174.0" y="205.14" font-size="9" text-anchor="middle" fill="currentColor">piece uploaded over TLS, encrypted at rest</text>
+<text x="356" y="190" font-size="9.5" fill="#b3261e">Only after steps 4 and 5 are verified</text>
+<text x="356" y="204" font-size="9.5" fill="#b3261e">and recorded in the database.</text>
+<path d="M174,222 L174,250" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<text x="184" y="243" font-size="9" fill="currentColor">read back</text>
+<rect x="24" y="256" width="300" height="56" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="174.0" y="281.03999999999996" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor">3 · UIU server checks the piece</text>
+<text x="174.0" y="295.13999999999993" font-size="9" text-anchor="middle" fill="currentColor">reads it back, re-hashes it, issues a receipt</text>
+<text x="356" y="280" font-size="9.5" fill="currentColor">A working copy, removed once the</text>
+<text x="356" y="294" font-size="9.5" fill="currentColor">recording is archived.</text>
+<path d="M174,312 L174,340" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<text x="184" y="333" font-size="9" fill="currentColor">merge when the consultation closes</text>
+<rect x="24" y="346" width="300" height="56" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="174.0" y="371.03999999999996" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor">4 · UIU archive array</text>
+<text x="174.0" y="385.13999999999993" font-size="9" text-anchor="middle" fill="currentColor">one WAV + one JSON per consultation, same name</text>
+<text x="356" y="370" font-size="9.5" fill="currentColor">The original. Kept at UIU; the</text>
+<text x="356" y="384" font-size="9.5" fill="currentColor">retention period is OD-06.</text>
+<path d="M174,402 L174,430" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+<text x="184" y="423" font-size="9" fill="currentColor">compress · check · encrypt · upload</text>
+<rect x="24" y="436" width="300" height="56" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+<text x="174.0" y="461.03999999999996" font-size="11" font-weight="600" text-anchor="middle" fill="currentColor">5 · Cloudflare R2 · copy bucket</text>
+<text x="174.0" y="475.13999999999993" font-size="9" text-anchor="middle" fill="currentColor">lossless FLAC, checked, encrypted, locked</text>
+<text x="356" y="460" font-size="9.5" fill="currentColor">Kept, locked against deletion. It can</text>
+<text x="356" y="474" font-size="9.5" fill="currentColor">rebuild the archive if UIU is lost.</text>
+<text x="24" y="520" font-size="9.5" fill="currentColor">The cloud pieces are deleted only when the recording is complete in two other places:</text>
+<text x="24" y="536" font-size="9.5" fill="currentColor">the UIU archive and the FLAC copy. A failure part way through costs time, never audio.</text>
+</svg>

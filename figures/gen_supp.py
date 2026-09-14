@@ -116,7 +116,7 @@ f.box(730, 120, 200, 64, [("CLOSED", 12.5, True), ("reason recorded", 9.5)], rx=
       sw=2)
 
 f.path("M276,152 L394,152", color=ACCENT, sw=2)
-f.label(335, 144, "consultation_complete", size=9.5, color=ACCENT, slot=(280, 390))
+f.label(335, 144, "prescription_built", size=9.5, color=ACCENT, slot=(280, 390))
 f.path("M606,152 L724,152")
 f.label(665, 144, "doctor presses Stop", size=9.5, slot=(610, 720))
 

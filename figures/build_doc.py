@@ -70,7 +70,10 @@ def convert(md: str) -> str:
             while k < n and not lines[k].strip():
                 k += 1
             if k < n and lines[k].startswith("**Figure"):
-                cap = inline(lines[k]); i = k
+                capl = []
+                while k < n and lines[k].strip():
+                    capl.append(lines[k]); k += 1
+                cap = inline(" ".join(capl)); i = k - 1
             out.append("<figure>" + svg_of(m.group(2)) +
                        (f"<figcaption>{cap}</figcaption>" if cap else "") + "</figure>")
             i += 1
@@ -210,7 +213,7 @@ def main() -> None:
     body_md = md[m.end():] if m else md
 
     figs = [(n, cap) for n, cap in
-            re.findall(r"\*\*Figure (\d)\.\*\*\s*([^.]+\.)", md)]
+            re.findall(r"\*\*Figure (\d+)\.\*\*\s*([^.]+\.)", md)]
 
     cover = [f"<div class='cover'><h1>{html.escape(title)}</h1>",
              "<p class='sub'>Integration specification for the CMED engineering team"
