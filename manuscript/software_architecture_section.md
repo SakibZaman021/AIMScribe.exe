@@ -5,15 +5,16 @@
 AIMScribe was developed not as a clinical application but as an event-driven,
 decentralised agent architecture, in which each consulting room operates as an
 autonomous node. The endpoint element, `aimscribe.exe`, is a lightweight edge
-daemon presented to the clinician only as a system-tray icon. Acquisition,
-segmentation and transmission run on independent threads and an asynchronous
-transport loop, so that disk and network latency cannot propagate back into
-the audio path. This separation is a deployment requirement, not an
-optimisation: the study sites run legacy, lower-specification workstations on
-which any blocking operation would degrade the electronic health record (EHR)
-in active use. Audio is acquired as linear PCM at the capture device's native
-sample rate, with operating-system resampling and channel down-mixing excluded
-from the path, at a sustained 88.2 kB s⁻¹.
+daemon presented to the clinician only as a system-tray icon and, during
+recording, a minimal stop-and-pause control. Acquisition, segmentation and
+transmission run on independent threads and an asynchronous transport loop, so
+that disk and network latency cannot propagate back into the audio path. This
+separation is a deployment requirement, not an optimisation: the study sites
+run legacy, lower-specification workstations on which any blocking operation
+would degrade the electronic health record (EHR) in active use. Audio is
+acquired as linear PCM at the capture device's native sample rate, with
+operating-system resampling and channel down-mixing excluded from the path, at
+a sustained 88.2 kB s⁻¹.
 
 The interoperability layer is agnostic to the partner record system. Rather
 than requiring each vendor to integrate with a remote service, it is exposed
@@ -43,8 +44,19 @@ interface event, the selection of patient details, dispatches a signal over
 the loopback channel to the local daemon, and background capture begins.
 Authorisation is obtained from the backend in parallel with acquisition rather
 than before it. Transient network latency thus cannot displace the opening
-seconds of the encounter, in which the presenting complaint is typically
-stated.
+seconds of the encounter, in which the presenting complaint is typically stated.
+
+Because acquisition begins without clinician action, consent is handled
+outside the recording path and refusal within it. Consent is obtained at
+reception under each clinic's existing procedure, and no consent attribute is
+required of the partner record system. A patient may nonetheless decline at
+any point in the encounter. The clinician then activates a persistent
+on-screen stop control and selects non-consent as the reason; acquisition
+ceases on the key press, before the reason is confirmed. The encounter's
+segments are then erased from the workstation, from object storage and from
+the backend, together with any clinical record received for that visit. This
+is the only sanctioned deletion path, and it leaves solely an audit entry
+containing neither audio nor patient identifiers.
 
 Triggering is synchronised with a fixed acoustic configuration in each room,
 necessary because the enclosures are acoustically hostile: ceiling fans,
