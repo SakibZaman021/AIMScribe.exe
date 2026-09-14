@@ -17,13 +17,13 @@ So CMED tells it. Three signals, across two channels.
 | | Signal | Sent when | Sent to |
 |---|---|---|---|
 | **API 1** | Trigger | The doctor opens the patient's details | The recorder on the doctor's PC |
-| **API 2** | Patient information, including consent | **At the same moment as API 1** | The AIMS LAB backend |
+| **API 2** | Patient information | **At the same moment as API 1** | The AIMS LAB backend |
 | **API 3** | Prescription built | The doctor builds the prescription | Both — see §5 |
 
 That is the entire integration. Everything else in this document explains those
 three signals.
 
-**What CMED does not have to do.** No audio to capture, store or handle. No
+**What CMED does not have to do.** Nothing about patient consent (§9b). No audio to capture, store or handle. No
 cryptographic keys to hold or rotate. No changes to the CMED database. No new
 login system. No software to install on the doctor's PC. No screen to build —
 every message the doctor sees comes from our own small on-screen control, not
@@ -130,8 +130,8 @@ Your server does not need it — see §5.
 as your page sends API 1. Do not wait for the recording to start.
 **Where:** Channel B, server to server.
 
-Before the patient enters the doctor's room, reception asks for the patient's
-consent, and a paramedic records their details and takes basic measurements. The doctor needs those at the start of the
+Before the patient enters the doctor's room, a paramedic records their details
+and takes basic measurements. The doctor needs those at the start of the
 consultation, and so do we. If the patient has been to this hospital before, we
 also need their most recent prescription — the doctor refers to it, and our
 system needs it to make sense of what is said.
@@ -148,9 +148,6 @@ X-CMED-Key: <the key we issue to you>
   "hospital_id": "CMED-DHK-BANANI-01",
   "start_time":  "2026-09-10T10:14:32+06:00",
   "date":        "2026-09-10",
-  "consent_obtained":    true,
-  "consent_method":      "verbal_at_reception",
-  "consent_recorded_at": "2026-09-10T10:02:00+06:00",
   "demographics": {
     "name": "…", "sex": "female", "age_years": 34,
     "phone": "…", "address": "…"
@@ -170,21 +167,6 @@ X-CMED-Key: <the key we issue to you>
   }
 }
 ```
-
-**Consent.** Send the consent your reception recorded for this visit.
-
-| Field | Required | Rule |
-|---|---|---|
-| `consent_obtained` | Yes | `true` only if the patient agreed to be recorded and to their record being used. |
-| `consent_method` | Yes | How consent was taken, up to 64 characters — for example `verbal_at_reception` or `signed_form`. |
-| `consent_recorded_at` | Helpful | When reception recorded it, with the time zone. |
-
-If `consent_obtained` is `false`, or missing, **we keep nothing for that visit.**
-The recorder stops, the audio it had already captured is deleted without being
-uploaded, and we store none of the patient's information or the prescription.
-The doctor's on-screen control says the consultation is not being recorded; the
-doctor carries on as normal. Our server replies `200 CONSENT_NOT_GIVEN`. There is
-nothing to retry.
 
 `previous_visit` is `null` for a patient who has not been to this hospital
 before. Send everything you hold for a returning patient — we would rather
@@ -247,8 +229,7 @@ X-CMED-Key: <your key>
 
 The five fields at the top are the same five as in API 1 and API 2, with the
 consultation's original `start_time` — not the time the prescription was issued.
-That is how the prescription attaches to the right consultation. If API 2 said
-the patient did not consent, we reply `200 CONSENT_NOT_GIVEN` and keep nothing.
+That is how the prescription attaches to the right consultation.
 
 Send `items` as a list, one entry per prescribed medicine, rather than as one
 block of text. We store each field in its own column, and a list we have to take
@@ -297,7 +278,6 @@ will be reworded; the code will not change.
 |---|---|---|---|
 | 202 | `ACCEPTED` | Stored | Nothing |
 | 200 | `ALREADY_RECEIVED` | This exact request was already stored | Nothing |
-| 200 | `CONSENT_NOT_GIVEN` | No consent: nothing kept for this visit | Nothing. Do not retry. |
 | 400 · 401 · 413 · 422 | e.g. `MISSING_FIELD`, `INVALID_KEY`, `SCHEMA_INVALID` | The request is wrong | Log it for a developer; do not retry unchanged |
 | 429 · 500 · 503 | `RATE_LIMITED`, `SERVER_ERROR`, `UNAVAILABLE` | Busy or failing on our side | Retry in the background, with a growing delay, for up to 24 hours |
 
@@ -333,8 +313,8 @@ After that, the machine is known to us and is tied to one clinic.
 **A registered PC still cannot record just because someone asks it to.** Every
 consultation needs its own short-lived permission, which the recorder requests
 from our backend at the moment of the trigger. Our backend checks that the doctor
-exists and works at that clinic, that the clinic matches the machine's
-registration, and that your API 2 records the patient's consent. The permission it issues lasts sixty
+exists and works at that clinic, and that the clinic matches the machine's
+registration. The permission it issues lasts sixty
 seconds and works once.
 
 **Why both.** Registration answers *may this machine record at all*. The
@@ -371,7 +351,6 @@ check runs alongside it.
 | Situation | What happens |
 |---|---|
 | API 2 arrives within a second or two | Confirmed. Nobody notices anything. |
-| API 2 says the patient did not consent | Recording stops at once. Nothing already captured is uploaded, and nothing about the visit is kept. |
 | API 2 is late | Recording keeps running. The recorder asks again every few seconds and is confirmed once API 2 arrives. |
 | API 2 never arrives | Recording is **not** cut. It is uploaded but marked *unconfirmed*, kept out of the dataset, and we are alerted. If API 2 arrives later it is admitted; if not, it is deleted from our server after 24 hours. |
 | The doctor opens a patient just to look | Your API 2 arrives but no recording asks for it. It expires after a few minutes. No harm. |
@@ -381,6 +360,23 @@ check runs alongside it.
 moment the patient is opened, with the same five fields as API 1. That timing is
 the whole requirement. If API 2 is sent late as a matter of routine, recordings
 will sit unconfirmed until it arrives.
+
+### 9b. When a patient does not want to be recorded
+
+**CMED sends nothing about consent.** Reception asks each patient before the
+consultation, as the clinic does today.
+
+If a patient does not want to be recorded — before or during the consultation —
+the doctor presses the red **Stop** button on our on-screen control and chooses
+**Patient did not consent**. The microphone stops the moment the button is
+pressed. That consultation's recording is then deleted from the PC and from our
+servers, and we keep none of the patient information or prescription you send
+for that visit.
+
+**Nothing changes for you.** Keep sending API 1, API 2 and API 3 as normal. Our
+server still replies `202 ACCEPTED` and simply keeps nothing for that visit. The
+recorder may reply `409 NO_ACTIVE_SESSION` to the arm signal; ignore it, as for
+any other `409`. The next patient is recorded as usual.
 
 ---
 
@@ -407,7 +403,7 @@ verified copy. It never travels to CMED.
 | 4 | Open the local connection from your page and keep it open | half a day |
 | 5 | Send API 1 when the doctor opens patient details | half a day |
 | 6 | Send API 3 when the prescription is built | quarter of a day |
-| 7 | Send API 2 from your backend **at the moment the patient is opened**, with the consent from reception, and the prescription when it is built, both with the same five fields as API 1 | one day |
+| 7 | Send API 2 from your backend **at the moment the patient is opened**, and the prescription when it is built, both with the same five fields as API 1 | one day |
 | 8 | Handle the replies by `code`; ignore failures quietly | half a day |
 | 9 | Joint testing with us | one day |
 | | **Total** | **3–4 developer-days** |
