@@ -7,11 +7,11 @@
 | | |
 |---|---|
 | Document | AIMS-SRS-001 |
-| Version | 3.0 |
+| Version | 3.1 |
 | Date | 14 September 2026 |
 | Status | Baseline for integration. Items marked **OD-nn** are open and need a decision (§14). |
 | Plan described | The plan agreed on 13 September 2026 — AIMS LAB server at UIU, three CMED signals over two channels, every recording confirmed, a lossless copy kept in the cloud |
-| Companion document | *AIMScribe — Integration Guide for CMED* (12 September 2026), the short version of what CMED builds |
+| Companion document | *AIMScribe — Integration Guide for CMED* (14 September 2026), the short version of what CMED builds |
 | Recorder version | 2.3.1 (`AIMScribe_Agent.exe`) |
 | Wire protocol | 2 today. The message changes in §6.1 are the next revision (§13.1). |
 | Deployment | 7 clinics · 14 consulting rooms · 30 doctors · 16 enrolled laptops |
@@ -74,7 +74,7 @@ This document states what the whole system must do, as numbered requirements tha
 | 1 | The doctor opens a patient's details in CMED. | Doctor |
 | 2 | CMED's server creates `start_time` once and returns it to the page with the patient's details. | CMED server |
 | 3 | The page sends **API 1 — trigger** to the recorder on the same PC. The microphone opens at once. | CMED page |
-| 4 | At the same moment, CMED's server sends **API 2 — patient information** to the AIMS LAB server, with the same five fields. | CMED server |
+| 4 | At the same moment, CMED's server sends **API 2 — patient information** to the AIMS LAB server, with the same five fields and the patient's consent. | CMED server |
 | 5 | The recorder asks the AIMS LAB server for permission to record. The server matches the request to API 2 and confirms the recording. | Recorder, AIMS LAB server |
 | 6 | The recorder cuts the audio into 30–60 second pieces, encrypts each piece on disk, and uploads it to Cloudflare R2. | Recorder |
 | 7 | The AIMS LAB server reads each piece back from R2 and checks its fingerprint. It then tells the PC it may delete its copy. | AIMS LAB server |
@@ -118,7 +118,7 @@ Most of §7 to §11 describes AIMS LAB's own obligations. It is written down so 
 | **Channel A** | The connection from the CMED page to the recorder on the same PC, `ws://127.0.0.1:5050/ws`. It never leaves the machine. |
 | **Channel B** | The connection from CMED's server to the AIMS LAB server, over HTTPS, with an API key. |
 | **API 1 · Trigger** | Channel A message: a consultation has started. It opens the microphone. |
-| **API 2 · Patient information** | Channel B message, sent at the same moment as API 1: demographics, paramedic measurements, and the previous prescription. |
+| **API 2 · Patient information** | Channel B message, sent at the same moment as API 1: the patient's consent, demographics, paramedic measurements, and the previous prescription. |
 | **API 3 · Prescription built** | Two messages when the prescription is built: `prescription_built` to the recorder, which arms it, and the prescription contents to the AIMS LAB server. |
 | **The five fields** | `patient_id`, `doctor_id`, `hospital_id`, `start_time`, `date`. API 1, API 2 and the prescription all carry them, identical. |
 | **Session** | One recorded consultation, from the moment the microphone opens to the moment it closes. |
@@ -176,6 +176,7 @@ This version brings the whole document in line with the plan agreed on 13 Septem
 | AIMS LAB server | Hosted on Render, database on Neon | **A server at UIU**, sized in §10.3 |
 | What CMED sends | Two signals to the recorder | **Three signals over two channels** — API 1, API 2 and API 3 |
 | The trigger | Carried a consent flag and a clinic code | **Five fields**: `patient_id`, `doctor_id`, `hospital_id`, `start_time`, `date` |
+| Consent | Carried in the trigger | **Carried in API 2**, from CMED's reception records. No consent, nothing kept. |
 | The arm signal | `consultation_complete` | **`prescription_built`**, carrying the `session_id` |
 | Is a request genuine? | Checked against AIMS LAB's register | Also **confirmed against CMED's API 2** (§5.6) |
 | Audio on the PC | Deleted after archiving, then a 24-hour wait | **Deleted at once** when the server holds a verified copy |
@@ -273,7 +274,7 @@ A `.bat` file on a clinical PC is a support call waiting to happen, and an audit
 | **ASM-02** | CMED can run JavaScript on the patient-details page | No integration is possible |
 | **ASM-03** | CMED holds a stable `patient_id`, `doctor_id` and clinic identifier | Recordings cannot be filed correctly |
 | **ASM-04** | A Build Prescription action exists and is used for every patient | The gate has no signal; §7.7 and §11 cover its absence |
-| **ASM-05** | Patient consent is obtained by clinic process before the consultation | How consent is recorded to AIMS LAB is **OD-13** |
+| **ASM-05** | Patient consent is obtained at reception, before the consultation, and recorded in CMED | Without it in API 2, nothing is kept (`SRS-CNF-11`) |
 | **ASM-06** | CMED authenticates its own doctors | AIMScribe never authenticates anyone against CMED |
 | **ASM-07** | PC clocks are within ±5 minutes of true time | Grant checks fail; see §11 |
 | **ASM-08** | CMED's server can send HTTPS requests to the AIMS LAB server at the moment a patient is opened | Recordings stay unconfirmed until API 2 arrives |
@@ -294,6 +295,7 @@ A `.bat` file on a clinical PC is a support call waiting to happen, and an audit
 | Issuing and rotating the Channel B API key | ● | |
 | **API 1 — the trigger, from the page** | | ● |
 | **API 2 — patient information, from the server** | | ● |
+| **Recording consent at reception, and sending it in API 2** | | ● |
 | **API 3 — prescription built, from the page and the server** | | ● |
 | **Creating `start_time` once, on the server** | | ● |
 | **Handling replies, and failing quietly** | | ● |
@@ -405,7 +407,7 @@ CMED sends two kinds of message, and they take different routes for a practical 
 |---|---|---|---|
 | **CMED page** — really, any page on the PC | Nothing. Its web address is checked against an allowlist. | Say *where* a consultation is happening: on this PC | Choose the clinic, or start a trusted recording on its own |
 | **Recorder** on an enrolled PC | A device token and a private key that never leaves the PC | Record, and sign what it recorded | Choose its own clinic, or record without a grant |
-| **CMED server** | The Channel B API key | Say a doctor *really* opened a patient, and send clinical data | Start, stop or control a recording |
+| **CMED server** | The Channel B API key | Say a doctor *really* opened a patient, say whether the patient consented, and send clinical data | Start, stop or control a recording |
 | **AIMS LAB server** | Its TLS certificate and the grant signing key | Authorise recordings, verify audio, issue receipts | — |
 
 **The trigger says where; the notice says whether.** A page on the PC can reach the recorder. It cannot make CMED's server send a matching API 2. So a recording with no matching notice is never admitted to the dataset (§5.6).
@@ -562,7 +564,7 @@ A grant is a short-lived, single-use, signed statement from the AIMS LAB server 
 | Clock allowance | 5 seconds | PC clocks drift |
 | Replay protection | A single-use identifier (`jti`), tracked by the recorder | A copied grant is refused even within its 60 seconds |
 | Audience | `aimscribe-recorder` | A grant cannot be reused for another service |
-| Claims | `patient_ref`, `doctor_id`, `hospital_id`, `start_time`, consent (see **OD-13**) | The recording is tied to exactly one consultation |
+| Claims | `patient_ref`, `doctor_id`, `hospital_id`, `start_time`, `consent_obtained` | The recording is tied to exactly one consented consultation |
 
 ### 5.3 Where grants are made
 
@@ -583,7 +585,7 @@ A grant is a short-lived, single-use, signed statement from the AIMS LAB server 
 >
 > **`SRS-GRT-02`** [M, T, AIMS] The grant endpoint shall be authenticated by the calling device's token, and shall grant only for that device's enrolled clinic.
 >
-> **`SRS-GRT-03`** [M, T, AIMS] Before granting, the AIMS LAB server shall check that: the doctor exists and is active; the doctor works at that clinic; the clinic matches the device's enrolment; and consent is recorded, by the means decided in **OD-13**. Any failure shall refuse the grant with a distinct code. Whether a matching API 2 exists is decided by §5.6.
+> **`SRS-GRT-03`** [M, T, AIMS] Before granting, the AIMS LAB server shall check that: the doctor exists and is active; the doctor works at that clinic; and the clinic matches the device's enrolment. Any failure shall refuse the grant with a distinct code. Whether a matching API 2 exists, and whether it records consent, is decided by §5.6.
 >
 > **`SRS-GRT-04`** [M, T, AIMS] The recorder shall check every grant against a public key pinned at installation: signature, issuer, audience and expiry, allowing no more than 5 seconds of clock difference.
 >
@@ -593,7 +595,7 @@ A grant is a short-lived, single-use, signed statement from the AIMS LAB server 
 >
 > **`SRS-GRT-07`** [M, D, AIMS] Asking for a grant shall not delay the microphone. Capture shall begin when the trigger arrives, and authorisation shall run alongside it.
 >
-> **`SRS-GRT-08`** [M, T, AIMS] If authorisation fails for a hard reason after capture has begun — the device is not enrolled or is revoked, the clinic does not match, or the doctor is not registered at that clinic — the audio captured under that trigger shall be discarded and not written to the buffer. A missing API 2 is not a hard failure; it is handled by §5.6.
+> **`SRS-GRT-08`** [M, T, AIMS] If authorisation fails for a hard reason after capture has begun — the device is not enrolled or is revoked, the clinic does not match, the doctor is not registered at that clinic, or the matching API 2 records no consent — the audio captured under that trigger shall be discarded and not written to the buffer. A missing API 2 is not a hard failure; it is handled by §5.6.
 
 ### 5.4 What CMED builds for authorisation
 
@@ -601,7 +603,7 @@ Nothing cryptographic. CMED's part is:
 
 1. Send five plain fields in API 1, instead of a signed token.
 2. Create `start_time` once on the server, and use the same value in API 1 and API 2.
-3. Send API 2 from the server at the moment the patient is opened.
+3. Send API 2 from the server at the moment the patient is opened, including the consent recorded at reception.
 4. Read the recorder's reply and branch on `code`.
 
 There is no key to generate, protect or rotate, no signing library, and no clock to synchronise. The only credential is the Channel B API key, which stays on CMED's server.
@@ -633,6 +635,7 @@ If a trigger names a clinic that does not match the PC's enrolment, one of two t
 | Situation | What happens |
 |---|---|
 | API 2 arrives within a second or two | Confirmed. Nobody notices anything. |
+| API 2 says the patient did not consent, or has no consent field | Recording stops at once. Audio already captured is deleted without being uploaded. The on-screen control tells the doctor this consultation is not being recorded. No patient information or prescription is kept. |
 | API 2 is late | Recording continues. The recorder asks again every 5 seconds and shows "confirming". Confirmed when API 2 arrives. |
 | API 2 never arrives | Recording is **not** cut. After two minutes it is marked *unconfirmed*, uploaded as usual, kept out of the dataset, and an alert is raised. |
 | API 2 arrives after that | The recording is admitted. |
@@ -660,6 +663,10 @@ If a trigger names a clinic that does not match the PC's enrolment, one of two t
 > **`SRS-CNF-09`** [M, T, AIMS] A notice arriving after a recording was marked unconfirmed shall still be matched, and the recording admitted. An unconfirmed recording that no notice matches within 24 hours shall be deleted from AIMS LAB's storage, and the deletion recorded in the audit log.
 >
 > **`SRS-CNF-10`** [M, T, AIMS] The match shall link the recording to its clinical record. The prescription sent later shall attach to the same consultation by the same five fields.
+>
+> **`SRS-CNF-11`** [M, T, AIMS] A recording shall be confirmed only when the matching API 2 carries `consent_obtained: true`. If it carries `false`, or no consent field, permission shall be refused with `CONSENT_NOT_GIVEN`, capture shall stop, and audio already captured under that trigger shall be deleted and never uploaded (`SRS-GRT-08`).
+>
+> **`SRS-CNF-12`** [M, T, AIMS] When API 2 records no consent, the AIMS LAB server shall keep no clinical content from it, or from the prescription for that consultation. It shall keep only the five fields and the time, for 24 hours, so it can refuse the recording and the prescription, and then delete them. Both requests shall be answered `200 CONSENT_NOT_GIVEN`.
 
 **A useful side effect.** Because the match links each recording to its patient information from the moment it starts, the nightly reconciliation in §8.6 becomes a safety net, not the main way records and recordings are joined.
 
@@ -816,7 +823,7 @@ At the same moment, CMED's server sends the prescription contents over Channel B
 |---|---|---|
 | `status` | On connection, and whenever state changes | Update an indicator, if CMED shows one |
 | `session_started` | Recording is running | Nothing required |
-| `session_stopped` | Session closed, with the reason | Nothing required |
+| `session_stopped` | Session closed, with the reason — including `consent_not_given` | Nothing required |
 | `session_paused` · `session_resumed` | The doctor used the on-screen control | Nothing required |
 | `session_confirmed` · `session_unconfirmed` | Result of the confirmation (§5.6) | Nothing required |
 | `gate_armed` | `prescription_built` accepted | Nothing required |
@@ -878,7 +885,7 @@ A recording that fails is a recording lost. A clinical system that stops because
 
 **When:** the moment the doctor opens the patient's details — at the same time the page sends API 1. Do not wait for the recording to start (`SRS-CNF-01`).
 
-**Why it is needed.** Before the patient enters the room, a paramedic records their details and takes basic measurements. The doctor needs these at the start of the consultation, and so does AIMS LAB. For a returning patient, AIMS LAB also needs the most recent prescription: the doctor refers to it, and the transcript cannot be understood without it. API 2 is also what confirms the recording is genuine (§5.6).
+**Why it is needed.** Before the patient enters the room, reception asks for the patient's consent and a paramedic records their details and takes basic measurements. The doctor needs these at the start of the consultation, and so does AIMS LAB. For a returning patient, AIMS LAB also needs the most recent prescription: the doctor refers to it, and the transcript cannot be understood without it. API 2 is also what confirms the recording is genuine (§5.6).
 
 ```
 POST /api/v2/clinical/patient-information
@@ -893,6 +900,9 @@ Content-Type: application/json
   "hospital_id": "CMED-DHK-BANANI-01",
   "start_time":  "2026-09-13T10:14:32+06:00",
   "date":        "2026-09-13",
+  "consent_obtained":    true,
+  "consent_method":      "verbal_at_reception",
+  "consent_recorded_at": "2026-09-13T10:02:00+06:00",
   "demographics": {
     "name": "…", "sex": "female", "age_years": 34,
     "phone": "…", "address": "…"
@@ -919,7 +929,9 @@ Content-Type: application/json
 | `demographics` | **Yes** | `name`, `sex` (`female` or `male`), `age_years` or `date_of_birth`, `phone`, `address` — send what CMED holds |
 | `paramedic` | When measured | `recorded_at` and each measurement taken. The full list is agreed with CMED (**OD-16**). |
 | `previous_visit` | **Yes** | `null` for a first visit. Otherwise the date, prescription, diagnoses and notes of the most recent visit to this hospital. |
-| Consent | To be agreed | How consent reaches AIMS LAB, for example `consent_obtained` and `consent_method` from reception records (**OD-13**) |
+| `consent_obtained` | **Yes** | `true` only if the patient agreed, at reception, to be recorded and to their record being used. `false` or missing: nothing is kept (`SRS-CNF-11`, `SRS-CNF-12`). |
+| `consent_method` | **Yes** | How consent was taken, up to 64 characters — for example `verbal_at_reception` or `signed_form` |
+| `consent_recorded_at` | Helpful | When reception recorded the consent, RFC 3339 |
 
 The fields needed for female and male patients differ. CMED sends what applies; the clinical database enforces the right rules for each (`SRS-DBA-06`). Send everything held for a returning patient — a field AIMS LAB does not yet use is stored, not lost.
 
@@ -977,6 +989,7 @@ Content-Type: application/json
 |---|---|---|---|
 | 202 | `ACCEPTED` | Stored | Nothing |
 | 200 | `ALREADY_RECEIVED` | This exact request was already stored | Nothing |
+| 200 | `CONSENT_NOT_GIVEN` | The patient did not consent: no recording and no clinical content are kept | Nothing. Do not retry. |
 | 400 | `MISSING_FIELD` · `INVALID_IDENTIFIER` · `MALFORMED_JSON` | The request is wrong | Log it; a developer fixes it. Do not retry unchanged. |
 | 401 | `INVALID_KEY` | Key missing or wrong | Log it and tell AIMS LAB. Do not retry. |
 | 413 | `TOO_LARGE` | Over 1 MB | Log it and tell AIMS LAB |
@@ -1287,6 +1300,7 @@ Before this control, a doctor who wanted to pause had to find the Windows tray, 
 | `SRS-UIX-11` | The control shall work from the keyboard and be readable at 125% and 150% display scaling. | S | D | AIMS |
 | `SRS-UIX-12` | The control shall require nothing from CMED. | M | I | AIMS |
 | `SRS-UIX-13` | While a recording waits for confirmation (`SRS-CNF-07`), the control shall show "confirming" in plain words, without an error or a sound. | M | D | AIMS |
+| `SRS-UIX-14` | When a recording is stopped because API 2 records no consent (`SRS-CNF-11`), the control shall say in plain words that this consultation is not being recorded, then close. It shall ask the doctor for nothing. | M | D | AIMS |
 
 **On `SRS-UIX-08`.** A doctor cannot stop a recording without a reason, so a vague stop cannot quietly damage data collection. But if the doctor pressed Stop because the patient just objected to being recorded, the microphone must stop *now*, not after a form. So the press cuts the microphone at once, and the form decides how the session is filed. The session stays open and unfiled until the form is completed, but the patient's objection is honoured instantly.
 
@@ -1294,7 +1308,7 @@ Before this control, a doctor who wanted to pause had to find the Windows tray, 
 
 | ID | Requirement | Pri | Ver | Owner |
 |---|---|---|---|---|
-| `SRS-BKD-01` | Consent shall be enforced separately in three places — the grant, the recorder, and a database constraint — using the consent record decided in **OD-13**. | M | T | AIMS |
+| `SRS-BKD-01` | Consent shall be enforced separately in three places: the grant, which requires `consent_obtained: true` in the matching API 2; the recorder, which keeps no audio without a grant; and a database constraint, which refuses a recording linked to a visit without consent. | M | T | AIMS |
 | `SRS-BKD-02` | An `audit_log` shall record every security-relevant event. Rows shall never be edited or deleted, enforced by a database trigger rather than by convention. | M | T | AIMS |
 | `SRS-BKD-03` | Every write shall be safe to retry; a repeated commit shall not create a duplicate row. | M | T | AIMS |
 | `SRS-BKD-04` | Identifiers shall be checked against `^[A-Za-z0-9_-]{1,64}$` wherever they enter the system. | M | T | AIMS |
@@ -1342,7 +1356,7 @@ Before this control, a doctor who wanted to pause had to find the Windows tray, 
 | Paramedic measurements and notes | API 2 | Clinical | Yes |
 | Previous prescription | API 2 | Clinical | Yes |
 | Prescription, diagnoses, tests, advice, follow-up | API 3 (Channel B) | Clinical | Yes |
-| Consent record | To be agreed (**OD-13**) | Consent | Yes |
+| `consent_obtained`, `consent_method`, `consent_recorded_at` | API 2 | Consent record | Yes — clinical database, JSON file and audit log. Without consent, nothing else is kept. |
 
 **AIMS LAB → CMED**
 
@@ -1413,6 +1427,7 @@ P0012345_DR0042_HOSP003_101432_102847_20260913
 | WAV and JSON | UIU archive | **OD-06** — not yet decided |
 | FLAC and JSON copy | R2 copy bucket, locked | **OD-06**; the lock period is **OD-20** |
 | Patient information waiting to be matched | `aims_recordings` | Five minutes (`SRS-CNF-03`); the information itself is kept as a clinical record |
+| Notice of a consultation without consent | `aims_recordings` | 24 hours — the five fields and time only — then deleted (`SRS-CNF-12`) |
 | Clinical records | `aims_clinical` | **OD-17** — decided with the ethics committee |
 | Session details | `aims_recordings` | Indefinitely |
 | Audit logs | Both databases | Indefinitely; never edited |
@@ -1458,10 +1473,10 @@ The clinical record arrives at two moments, both server to server on Channel B (
 
 | Moment | What CMED's server sends | Why then |
 |---|---|---|
-| Patient opened | **API 2**: demographics, paramedic measurements and notes, and the previous prescription for a returning patient | The doctor needs the history at the start. It also confirms the recording (§5.6). |
+| Patient opened | **API 2**: consent, demographics, paramedic measurements and notes, and the previous prescription for a returning patient | The doctor needs the history at the start. It also confirms the recording (§5.6). |
 | Prescription built | **API 3**: prescription, diagnoses, tests, advice, notes | These do not exist until the prescription is built — the same moment the recording is armed |
 
-> **`SRS-CRI-01`** [M, T, CMED] Patient information shall be sent by CMED's server to the AIMS LAB server at the moment the patient is opened, carrying the five fields and a `demographics` object with the details recorded before the patient entered the room.
+> **`SRS-CRI-01`** [M, T, CMED] Patient information shall be sent by CMED's server to the AIMS LAB server at the moment the patient is opened, carrying the five fields, the consent record, and a `demographics` object with the details recorded before the patient entered the room.
 >
 > **`SRS-CRI-02`** [M, T, CMED] For a patient who has visited before, the patient information shall also carry `previous_visit`: the complete most recent prescription, with its date.
 >
@@ -1547,7 +1562,7 @@ Separating them costs a join made in application code rather than by the databas
 | Table | One row per | Holds |
 |---|---|---|
 | `patients` | Patient | `patient_id` (primary key), `sex`, `full_name`, `date_of_birth`, `phone`, `address` |
-| **`encounters`** | **Visit** | `encounter_id`, `patient_id`, `doctor_id`, `hospital_id`, `start_time`, `date`, `file_stem`, `session_id`, `source` |
+| **`encounters`** | **Visit** | `encounter_id`, `patient_id`, `doctor_id`, `hospital_id`, `start_time`, `date`, `file_stem`, `session_id`, `source`, `consent_obtained`, `consent_method`, `consent_recorded_at` |
 | `encounter_demographics` | Visit | Details as CMED sent them that day, so older visits still show what was true then |
 | `paramedic_observations` | Visit | Blood pressure, pulse, temperature, oxygen, weight, height, notes |
 | `female_details` | Visit, female patients only | Fields that apply only to female patients (**OD-15**) |
@@ -1621,6 +1636,7 @@ One JSON file per visit, with the same name as the WAV, written when the recordi
   "patient":   { "patient_id": "P0012345", "sex": "female", "full_name": "…" },
   "visit":     { "doctor_id": "DR0042", "hospital_id": "HOSP003",
                  "cmed_hospital_id": "CMED-DHK-BANANI-01",
+                 "consent_obtained": true, "consent_method": "verbal_at_reception",
                  "start_time": "2026-09-13T10:14:32+06:00",
                  "end_time":   "2026-09-13T10:28:47+06:00" },
   "paramedic": { "blood_pressure": "120/80", "pulse_bpm": 78 },
@@ -1913,8 +1929,9 @@ At every scale, the first limit is how long audio is kept, not processing power 
 | 20 | A cloud-copy step fails | Step check | Pieces kept; step retried; alert if it repeats (`SRS-ARC-10`) | Nothing | **None** |
 | 21 | One or two archive disks fail | RAID alert | Array keeps working; disks replaced | Nothing | **None** |
 | 22 | UIU server lost entirely | Monitoring | Archive rebuilt from cloud copies, databases from the nightly dump (`SRS-NFR-06`); recorders buffer meanwhile | Tray warning if prolonged | **None** for archived audio; buffered audio at risk after about 13 hours |
+| 23 | Patient did not consent | API 2 has `consent_obtained: false`, or no consent field | Recording stopped; captured audio deleted without upload; no clinical content kept (`SRS-CNF-11`, `SRS-CNF-12`) | "This consultation is not being recorded" | **None** — as intended |
 
-**Read the last column.** In twenty-two failures, a recording may be delayed, withheld or lost — but in none of them is a doctor stopped from seeing a patient. That is `SRS-IF1-17` holding all the way down.
+**Read the last column.** In these twenty-three situations, a recording may be delayed, withheld, lost or deliberately not kept — but in none of them is a doctor stopped from seeing a patient. That is `SRS-IF1-17` holding all the way down.
 
 ---
 
@@ -1930,7 +1947,7 @@ Each test passes or fails on a running system, and names the requirements it che
 |---|---|---|---|
 | `AT-01` | Doctor opens a patient in CMED | IF1-01, CAP-03, GRT-07 | Microphone on within 500 ms; `200 RECORDING_STARTED` within 2 s |
 | `AT-02` | Send a trigger with no `doctor_id` | INV-03 | Refused `400 MISSING_FIELD`; nothing recorded |
-| `AT-03` | Send API 2 recording that consent was not obtained, once **OD-13** is decided | BKD-01 | Recording not confirmed; kept out of the dataset |
+| `AT-03` | Send API 2 with `consent_obtained: false`, then the trigger | BKD-01, CNF-11, CNF-12, UIX-14 | Recording stops; no audio uploaded; no clinical content stored; both Channel B replies `200 CONSENT_NOT_GIVEN` |
 | `AT-04` | Send a trigger naming a clinic other than the PC's | GRT-10, ENR-20 | Refused `401 CLINIC_MISMATCH`; alert raised |
 | `AT-05` | Connect from a page address not on the allowlist | IF1-06 | Connection closed with `4403` before it is accepted |
 | `AT-06` | Connect with `Host: evil.example` pointing at 127.0.0.1 | IF1-06 | Refused |
@@ -2004,6 +2021,7 @@ Each test passes or fails on a running system, and names the requirements it che
 | `AT-74` | Restore one day's recordings from the copy bucket to a spare machine | STO-06, NFR-06 | Decoded audio identical to the archive; chains verify |
 | `AT-75` | Leave a recording unconfirmed for 24 hours | CNF-09, ARC-16 | Never archived or copied; pieces deleted from R2; deletion in the audit log |
 | `AT-76` | Fail two disks in a test RAID 6 array during archiving | SRV-04 | Archiving continues; alert raised |
+| `AT-77` | Send API 2 with no consent field | CNF-11 | Treated exactly as no consent |
 
 ### 12.2 Pilot exit criteria
 
@@ -2022,7 +2040,7 @@ The integration is accepted when:
 | `INV` | AT-02, AT-04, AT-51, code inspection |
 | `ENR` | AT-21 – AT-26, AT-40 |
 | `GRT` | AT-04, AT-07, AT-08, AT-28 |
-| `CNF` | AT-57 – AT-63, AT-75 |
+| `CNF` | AT-03, AT-57 – AT-63, AT-75, AT-77 |
 | `IF1` | AT-01, AT-05, AT-06, AT-09 – AT-12, AT-27, AT-31, AT-32 |
 | `CHB` | AT-49, AT-50, AT-68 – AT-72 |
 | `STO` | AT-67, AT-74 |
@@ -2081,7 +2099,7 @@ This document is a design baseline, not a description of finished software.
 | 4 | Open the Channel A connection from the page and keep it open (Appendix B.1) | Half a day |
 | 5 | Send API 1 when patient details open, using `start_time` from the server | Half a day |
 | 6 | Send `prescription_built` when the prescription is built | Quarter of a day |
-| 7 | Send API 2 from the server at the moment the patient is opened, and the prescription when it is built, with background retry (Appendix B.3) | One day |
+| 7 | Send API 2 from the server at the moment the patient is opened, with the consent from reception records, and the prescription when it is built, with background retry (Appendix B.3) | One day |
 | 8 | Handle replies by `code`, and ignore failures quietly | Half a day |
 | 9 | Joint testing with AIMS LAB | One day |
 | | **Total** | **3–4 developer-days** |
@@ -2094,7 +2112,7 @@ Working recorders on enrolled PCs, the UIU server, both databases, the archive a
 
 | Phase | What | Moves on when |
 |---|---|---|
-| **0** | Agree page addresses, clinic mapping, identifier stability, consent (**OD-13**), and the open decisions; exchange the Channel B test key | Written agreement |
+| **0** | Agree page addresses, clinic mapping, identifier stability, the consent wording (`SRS-DAT-15`), and the open decisions; exchange the Channel B test key | Written agreement |
 | **1** | AIMS LAB: recorder changes, grant, Channel B endpoints, confirmation, test page and test environment | `AT-01`–`AT-12`, `AT-57`–`AT-63` and `AT-68`–`AT-70` pass on a bench |
 | **2** | CMED: tasks 4–8 against the test environment, following the testing steps in the *Integration Guide* | `AT-27`, `AT-32`, `AT-71`, `AT-72` pass |
 | **3** | AIMS LAB: on-screen control; UIU server in service; archive and cloud copy | `AT-13`–`AT-15`, `AT-64`–`AT-67`, `AT-73`, `AT-74` pass |
@@ -2119,7 +2137,7 @@ Working recorders on enrolled PCs, the UIU server, both databases, the archive a
 | **OD-10** | *Closed 13 September 2026:* the AIMS LAB server is hosted at UIU (§10.3). | — | — | — |
 | **OD-11** | Can the current speakerphone meet §7.1a, or must the microphone be replaced? | Measurement | Commissioning | Decided by `AT-34` and `AT-35`, not by opinion |
 | **OD-12** | Record at the microphone's native 48 kHz instead of 44.1 kHz? | AIMS LAB | Phase 1 | Removes a resampling step; costs 9% more storage |
-| **OD-13** | How consent reaches AIMS LAB now that the trigger no longer carries it — proposed: `consent_obtained` and `consent_method` in API 2, from reception records | Joint | Phase 0 | `SRS-BKD-01` and `SRS-GRT-03` cannot check consent |
+| **OD-13** | *Closed 14 September 2026:* consent is sent in API 2 as `consent_obtained` and `consent_method`, from CMED's reception records (§6.2.2, `SRS-CNF-11`). | — | — | — |
 | **OD-14** | Is storing encrypted patient audio with a provider outside Bangladesh acceptable under the study's approval and national data-protection rules? | Ethics committee | First cloud upload | No patient audio can go to the cloud |
 | **OD-15** | The fields for `female_details` and `male_details` | Clinical team | Clinical database | Those tables cannot be finished |
 | **OD-16** | The full list of paramedic measurements CMED will send | CMED | Phase 1 | API 2 schema incomplete |
@@ -2290,7 +2308,8 @@ const visit = { patient_id, doctor_id, hospital_id,
                 start_time: dhakaTimestamp(),   // created once, here (SRS-CNF-02)
                 date: dhakaDate() };
 sendToAims('patient-information',              // not awaited (SRS-CHB-06)
-           { ...visit, demographics, paramedic, previous_visit });
+           { ...visit, consent_obtained, consent_method, consent_recorded_at,
+             demographics, paramedic, previous_visit });
 return { ...patientDetails, visit };            // the page uses visit.start_time
 
 // When Build Prescription succeeds:
@@ -2394,6 +2413,7 @@ Four credentials — `X-Device-Token`, `X-Worker-Key`, `X-Admin-Key` and `X-CMED
 
 | Version | Date | Change |
 |---|---|---|
+| 3.1 | 14 September 2026 | Consent travels in API 2 (`consent_obtained`, `consent_method`, `consent_recorded_at`), closing OD-13. Without consent the recording stops, captured audio is deleted without upload, and no clinical content is kept (`SRS-CNF-11`–`12`, `SRS-UIX-14`, reply `200 CONSENT_NOT_GIVEN`). `SRS-BKD-01`, `SRS-GRT-03` and `SRS-GRT-08` updated; failure 23 and `AT-77` added; `AT-03` rewritten. |
 | 3.0 | 14 September 2026 | Whole document brought in line with the plan of 13 September 2026, and rewritten for CMED readers. AIMS LAB server hosted at UIU (§10.3, `SRS-SRV-01`–`09`; OD-10 closed). CMED's three signals over two channels described end to end, with Channel B defined as an interface (§6.2, `SRS-CHB-01`–`12`). Trigger reduced to five fields; arm signal renamed `prescription_built`. Audio journey from PC to archive and cloud copy (§3.5); cloud storage requirements (`SRS-STO-01`–`06`) and sizing (§10.4). Two databases and the JSON file beside each recording (§8.7, §8.8). `SRS-ARC-05` withdrawn; `SRS-ARC-13`–`16`, `SRS-UIX-13`, `SRS-DSH-08`–`09`, `SRS-NFR-06`, `SRS-API-05` added. Failure modes extended to 22; tests `AT-68`–`AT-76` added. New figures 1 and 6; figures that described the earlier plan replaced. Open decisions OD-13 to OD-21 added. |
 | 2.3 | 13 September 2026 | Cloud pieces no longer simply deleted after archiving: the recording is stored and verified at UIU first, a merged lossless FLAC copy is verified and kept in a locked bucket, and only then are the pieces deleted (`SRS-ARC-08`–`12`, `SRS-DAT-17`, `AT-64`–`AT-67`). |
 | 2.2 | 12 September 2026 | Trigger confirmation (`SRS-CNF-01`–`10`): the trigger stays on the PC, and each recording is confirmed against the patient information CMED's server sends at the same moment. Tests `AT-57`–`AT-63`. |
